@@ -1,253 +1,190 @@
-require('dotenv').config()
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const { Server } = require('socket.io');
 const setupSocket = require('./socketHandler');
+const fs = require('fs');
+const path = require('path');
+const csv = require('csv-parser');
+const axios = require('axios');
 
 const app = express();
 const server = http.createServer(app);
+const allowedOrigin = "http://localhost:3001";
 const io = new Server(server, {
   cors: {
-    origin:"http://localhost:8000",
+    origin: allowedOrigin,
     methods: ['GET', 'POST'],
-    credentials: true
+    credentials: true,
   },
+  transports: ["websocket"], // WebSocket preferred
 });
 
-// app.use(cors({
-//   origin: process.env.FRONTEND_URL || "http://localhost:8000",
-//   methods: ['GET', 'POST'],
-//   credentials: true
-// }));
-app.use(cors());
+app.use(cors({
+  origin: allowedOrigin,
+  credentials: true,
+}));
 app.use(express.json());
 
-const PORT = process.env.PORT || 8000;
 const rooms = {};
 
-// Initialize socket handling
-setupSocket(io, rooms);
+// API configuration
+const API_URL = 'https://api.sportsdata.io/v3/nfl/scores/json/PlayersByAvailable';
+const API_KEY = 'b4197e932fce4f46b064f4af2f22bc98';
 
-// Health check endpoint
-app.get('/', (req, res) => {
-  res.json({
-    message: '✅ Real-time Cricket Team Selection Backend Running',
-    activeRooms: Object.keys(rooms).length,
-    timestamp: new Date().toISOString()
-  });
+// Create Room
+app.post('/api/create-room', async (req, res) => {
+  try {
+    const roomId = generateRoomId();
+    const playerPool = await generatePlayerPool();
+
+    rooms[roomId] = {
+      hostId: null,
+      users: [],
+      selections: {},
+      turnOrder: [],
+      currentTurnIndex: 0,
+      started: false,
+      pool: playerPool,
+      preferredQueue: {},
+      timer: null,
+      createdAt: new Date().toISOString(),
+      disconnectedUsers: [],
+      selectionPhase: 'main', // Changed from 'offense' to match socketHandler
+      maxMainPlayers: 5,      // Changed from maxOffensePlayers
+      maxBenchPlayers: 2,     // Changed from maxDefensePlayers
+      draftRound: 1,
+      maxRounds: 15
+    };
+
+    console.log(`Room ${roomId} created with ${playerPool.length} NFL players`);
+    res.json({ roomId, message: 'NFL Draft Room created successfully' });
+  } catch (error) {
+    console.error('Error creating room:', error);
+    res.status(500).json({ error: 'Failed to create room' });
+  }
 });
 
-// Create room endpoint
-app.post('/api/create-room', (req, res) => {
-  const roomId = generateRoomId();
-  rooms[roomId] = {
-    hostId: null,
-    users: [],
-    selections: {},
-    turnOrder: [],
-    currentTurnIndex: 0,
-    started: false,
-    pool: generatePlayerPool(), // This now uses the correct function
-    timer: null,
-    createdAt: new Date().toISOString(),
-    disconnectedUsers: [] // Initialize disconnected users array
-  };
-  
-  console.log(`Room ${roomId} created with ${rooms[roomId].pool.length} players`);
-  res.json({ roomId, message: 'Room created successfully' });
-});
-
-// Get room info endpoint
+// Get Room Info
 app.get('/api/room/:roomId', (req, res) => {
   const room = rooms[req.params.roomId];
-  if (!room) {
-    return res.status(404).json({ error: 'Room not found' });
-  }
- 
+  if (!room) return res.status(404).json({ error: 'Room not found' });
+
   res.json({
     roomId: req.params.roomId,
     userCount: room.users.length,
-    users: room.users.map(u => ({ username: u.username })), // Don't expose socket IDs
+    users: room.users.map(u => ({ username: u.username })),
     started: room.started,
     poolSize: room.pool.length,
-    createdAt: room.createdAt
+    createdAt: room.createdAt,
+    currentRound: room.draftRound,
+    selectionPhase: room.selectionPhase
   });
 });
 
-// Get all active rooms endpoint
+// Get All Rooms
 app.get('/api/rooms', (req, res) => {
   const roomList = Object.keys(rooms).map(roomId => ({
     roomId,
     userCount: rooms[roomId].users.length,
     started: rooms[roomId].started,
-    createdAt: rooms[roomId].createdAt
+    createdAt: rooms[roomId].createdAt,
+    currentRound: rooms[roomId].draftRound
   }));
-  
   res.json({ rooms: roomList, total: roomList.length });
 });
 
+app.get('/', (req, res) => {
+  res.json({
+    message: '🏈 Real-time NFL Team Selection Backend Running',
+    activeRooms: Object.keys(rooms).length,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Utility: Room ID
 function generateRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// Use the same generatePlayerPool function as in socketHandler.js
-function generatePlayerPool() {
-  return [
-    {
-      name: 'Virat Kohli',
-      role: 'Batsman',
-      image: 'https://upload.wikimedia.org/wikipedia/commons/9/9b/Virat_Kohli_in_PMO_New_Delhi.jpg'
-    },
-    {
-      name: 'Rohit Sharma',
-      role: 'Batsman',
-      image: 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSoVuOX9HV9kcrTird7QDU9Zul_7164R4_XBQ&s'
-    },
-    {
-      name: 'MS Dhoni',
-      role: 'Wicket-keeper',
-      image: 'https://cdn.britannica.com/25/222725-050-170F622A/Indian-cricketer-Mahendra-Singh-Dhoni-2011.jpg'
-    },
-    {
-      name: 'Jasprit Bumrah',
-      role: 'Bowler',
-      image: 'https://upload.wikimedia.org/wikipedia/commons/0/02/Jasprit_Bumrah_in_PMO_New_Delhi.jpg'
-    },
-    {
-      name: 'Ravindra Jadeja',
-      role: 'All-rounder',
-      image: 'https://upload.wikimedia.org/wikipedia/commons/2/2c/PM_Shri_Narendra_Modi_with_Ravindra_Jadeja_%28Cropped%29.jpg'
-    },
-    {
-      name: 'Shubman Gill',
-      role: 'Batsman',
-      image: 'https://documents.iplt20.com/ipl/IPLHeadshot2025/62.png'
-    },
-    {
-      name: 'KL Rahul',
-      role: 'Wicket-keeper',
-      image: 'https://documents.bcci.tv/resizedimageskirti/1125_compress.png'
-    },
-    {
-      name: 'Hardik Pandya',
-      role: 'All-rounder',
-      image: 'https://upload.wikimedia.org/wikipedia/commons/f/fc/Hardik_Pandya_in_PMO_New_Delhi.jpg'
-    },
-    {
-      name: 'Ravichandran Ashwin',
-      role: 'Bowler',
-      image: 'https://i2.wp.com/crictoday.com/wp-content/uploads/2023/03/316521.webp?ssl=1'
-    },
-    {
-      name: 'Suryakumar Yadav',
-      role: 'Batsman',
-      image: 'https://upload.wikimedia.org/wikipedia/commons/b/b7/Suryakumar_Yadav_in_PMO_New_Delhi.jpg'
-    },
-    {
-      name: 'Mohammed Shami',
-      role: 'Bowler',
-      image: 'https://www.gujarattitansipl.com/static-assets/images/players/28994.png?v=5.55'
-    },
-    {
-      name: 'Shreyas Iyer',
-      role: 'Batsman',
-      image: 'https://documents.bcci.tv/resizedimageskirti/1563_compress.png'
-    },
-    {
-      name: 'Rishabh Pant',
-      role: 'Wicket-keeper',
-      image: 'https://media.gettyimages.com/id/2155145413/photo/new-york-new-york-rishabh-pant-of-india-poses-for-a-portrait-prior-to-the-icc-mens-t20.jpg?s=612x612&w=gi&k=20&c=I8p09aXSvPR_FK-zO9PPakfibNsDh8VJFqOuwgeKG0A='
-    },
-    {
-      name: 'Yuzvendra Chahal',
-      role: 'Bowler',
-      image: 'https://media.gettyimages.com/id/2155703340/photo/new-york-new-york-yuzendra-chahal-of-india-poses-for-a-portrait-prior-to-the-icc-mens-t20.jpg?s=612x612&w=gi&k=20&c=SHJi9nPilxkpbl5t4zg103hZCFta17DfrCDgvQOwSOs='
-    },
-    {
-      name: 'Bhuvneshwar Kumar',
-      role: 'Bowler',
-      image: 'https://i.pinimg.com/474x/a9/6d/0b/a96d0bbd8cb438403105ee8aaf840cfb.jpg'
-    },
-    {
-      name: 'Axar Patel',
-      role: 'All-rounder',
-      image: 'https://upload.wikimedia.org/wikipedia/commons/a/ad/Axar_Patel_in_PMO_New_Delhi.jpg'
-    },
-    {
-      name: 'Ishan Kishan',
-      role: 'Wicket-keeper',
-      image: 'https://documents.bcci.tv/resizedimageskirti/31_compress.png'
-    },
-    {
-      name: 'Washington Sundar',
-      role: 'All-rounder',
-      image: 'https://static-files.cricket-australia.pulselive.com/headshots/440/10947-camedia.png'
-    },
-    {
-      name: 'Kuldeep Yadav',
-      role: 'Bowler',
-      image: 'https://media.gettyimages.com/id/1713187439/photo/thiruvananthapuram-india-kuldeep-yadav-of-india-poses-for-a-portrait-ahead-of-the-icc-mens.jpg?s=612x612&w=gi&k=20&c=ztPCSdNAW_VLjXdpNzl4pBdKzuFp0w67swgy2Am-LZg='
-    },
-    {
-      name: 'Deepak Chahar',
-      role: 'Bowler',
-      image: 'https://documents.iplt20.com/ipl/IPLHeadshot2025/91.png'
-    },
-    {
-      name: 'Prithvi Shaw',
-      role: 'Batsman',
-      image: 'https://documents.iplt20.com/ipl/IPLHeadshot2024/51.png'
-    },
-    {
-      name: 'Sanju Samson',
-      role: 'Wicket-keeper',
-      image: 'https://indiananchors.in/wp-content/uploads/2025/01/Sanju-samson.png'
-    },
-    {
-      name: 'Umran Malik',
-      role: 'Bowler',
-      image: 'https://www.hindustantimes.com/static-content/1y/cricket-logos/players/umran-malik.png'
-    },
-    {
-      name: 'Arshdeep Singh',
-      role: 'Bowler',
-      image: 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcR3k_b9rdRgfm7MwregvYkkuIa7H0NMjSY9UQ&s'
-    },
-    {
-      name: 'Tilak Varma',
-      role: 'Batsman',
-      image: 'https://www.mumbaiindians.com/static-assets/waf-images/14/fe/b4/16-9/1920-1080/aRWZYjG3Hb.png'
-    },
-    {
-      name: 'Mohammed Siraj',
-      role: 'Bowler',
-      image: 'https://documents.bcci.tv/resizedimageskirti/3840_compress.png'
-    },
-    {
-      name: 'Shardul Thakur',
-      role: 'All-rounder',
-      image: 'https://d1k8sn41pix00a.cloudfront.net/media/players/photos/shardul_thakur.webp'
-    },
-    {
-      name: 'Dinesh Karthik',
-      role: 'Wicket-keeper',
-      image: 'https://static-files.cricket-australia.pulselive.com/headshots/440/10910-camedia.png'
-    },
-    {
-      name: 'Deepak Hooda',
-      role: 'All-rounder',
-      image: 'https://cinetown.s3.ap-south-1.amazonaws.com/people/profile_img/1714157747.png'
-    },
-    {
-      name: 'Ruturaj Gaikwad',
-      role: 'Batsman',
-      image: 'https://th.bing.com/th/id/R.c3a5f2a3df874ccbc6e2f2ee01944c66?rik=tCrAKGyIirvqKw&riu=http%3a%2f%2finstitute.careerguide.com%2fwp-content%2fuploads%2f2024%2f04%2fRuturaj-Gaikwad.png&ehk=A01ASVCX9%2bqkCdgWDKCOezcAOddxKAjVIWi91B4iGg0%3d&risl=&pid=ImgRaw&r=0'
+// Fixed API call - using headers instead of params
+async function generatePlayerPool() {
+  try {
+    const response = await axios.get(API_URL, {
+      headers: {
+        'Ocp-Apim-Subscription-Key': API_KEY
+      }
+    });
+
+    const rawPlayers = response.data;
+    console.log(`✅ Loaded ${rawPlayers.length} players from SportsDataIO API`);
+
+    // Filter and create a balanced pool similar to socketHandler
+    const positionGroups = {
+      QB: [],
+      RB: [],
+      WR: [],
+      TE: [],
+      K: [],
+      DST: []
+    };
+
+    // Filter players into positions
+    for (const player of rawPlayers) {
+      const pos = player.Position;
+      if (pos === "QB") positionGroups.QB.push(player);
+      else if (pos === "RB") positionGroups.RB.push(player);
+      else if (pos === "WR") positionGroups.WR.push(player);
+      else if (pos === "TE") positionGroups.TE.push(player);
+      else if (pos === "K") positionGroups.K.push(player);
+      else if (pos === "DST") positionGroups.DST.push(player);
     }
-  ];
+
+    // Create a balanced pool
+    const getRandom = (arr, count) => arr.sort(() => 0.5 - Math.random()).slice(0, count);
+
+    const pool = [
+      ...getRandom(positionGroups.QB, 8),
+      ...getRandom(positionGroups.RB, 15),
+      ...getRandom(positionGroups.WR, 20),
+      ...getRandom(positionGroups.TE, 10),
+      ...getRandom(positionGroups.K, 5),
+      ...getRandom(positionGroups.DST, 5)
+    ];
+
+    console.log(`✅ Created balanced pool with ${pool.length} players`);
+    return pool;
+
+  } catch (error) {
+    console.error("❌ Error fetching player data from API:", error.message);
+    console.error("Error details:", error.response?.data || error.message);
+    
+    // Return empty array if API fails
+    return [];
+  }
 }
 
+// Setup Socket.IO
+setupSocket(io, rooms);
+
+const PORT = process.env.PORT || 8000;
+
 server.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
-  console.log(`🎯 Socket.IO ready for connections`);
+  console.log(`🏈 NFL Team Selection Server running on port ${PORT}`);
+  console.log(`📊 Server started at ${new Date().toISOString()}`);
+  console.log(`🌐 Server accessible at http://localhost:${PORT}`);
+});
+
+// Error handling for server
+server.on('error', (error) => {
+  console.error('Server error:', error);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });

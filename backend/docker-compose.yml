@@ -4,10 +4,10 @@ services:
   app:
     build: .
     ports:
-      - "7000:7000"
+      - "8000:8000"
     environment:
       - NODE_ENV=production
-      - PORT=7000
+      - PORT=8000
       - DB_HOST=${DB_HOST}
       - DB_PORT=${DB_PORT}
       - DB_NAME=${DB_NAME}
