@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { io } from "socket.io-client";
 import axios from "axios";
 
@@ -454,6 +454,22 @@ const App = () => {
       return () => clearInterval(interval);
     }
   }, [turnTimer, gameStarted, isMyTurn]);
+
+  // Animate player removal when pool updates
+  const [removingPlayers, setRemovingPlayers] = useState([]);
+  const prevPoolRef = useRef([]);
+
+  useEffect(() => {
+    const prevPool = prevPoolRef.current;
+    const removed = prevPool.filter(
+      (p) => !pool.some((np) => np.PlayerID === p.PlayerID)
+    );
+    if (removed.length > 0) {
+      setRemovingPlayers(removed.map((p) => p.PlayerID));
+      setTimeout(() => setRemovingPlayers([]), 500); // match CSS transition
+    }
+    prevPoolRef.current = pool;
+  }, [pool]);
 
   // Get preferred player details
   const preferredPlayerDetails = (Array.isArray(preferred) ? preferred : []).map(pid =>
@@ -946,6 +962,7 @@ const App = () => {
                 return (
                   <div
                     key={player.PlayerID}
+                    className={`player-card${removingPlayers.includes(player.PlayerID) ? " removing" : ""}`}
                     style={{
                       margin: "8px 0",
                       padding: "0.75rem",

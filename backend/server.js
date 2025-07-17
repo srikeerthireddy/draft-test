@@ -103,6 +103,23 @@ app.get('/', (req, res) => {
   });
 });
 
+// Add endpoint to fetch all players from SportsData.io
+app.get('/api/all-players', async (req, res) => {
+  try {
+    const apiKey = process.env.SPORTS_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'API key missing on server.' });
+    }
+    const response = await axios.get(
+      'https://api.sportsdata.io/v3/nfl/scores/json/PlayersByAvailable',
+      { headers: { 'Ocp-Apim-Subscription-Key': apiKey } }
+    );
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Utility: Room ID
 function generateRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();

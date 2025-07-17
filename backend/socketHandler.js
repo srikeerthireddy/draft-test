@@ -768,15 +768,51 @@ function shuffleArray(array) {
   return arr;
 }
 
+// Helper function to immediately remove a player from the pool
+function removePlayerFromPool(room, playerID) {
+  if (!room.pool) {
+    console.warn('No pool available to remove player from');
+    return false;
+  }
+  
+  const initialPoolSize = room.pool.length;
+  room.pool = room.pool.filter((p) => p.PlayerID !== playerID);
+  const finalPoolSize = room.pool.length;
+  
+  if (finalPoolSize === initialPoolSize) {
+    console.warn(`Player with ID ${playerID} was not found in pool`);
+    return false;
+  }
+  
+  console.log(`✅ Player ${playerID} immediately removed from pool. Pool size: ${initialPoolSize} → ${finalPoolSize}`);
+  return true;
+}
+
 function selectPlayerForUser(room, userId) {
+  // Ensure we have a valid pool
+  if (!room.pool || room.pool.length === 0) {
+    throw new Error('No players available in pool');
+  }
+
   const preferredQueue = room.preferredQueue[userId] || [];
+  
+  // First, try to find a preferred player that's still available
   for (const playerId of preferredQueue) {
     const preferredPlayer = room.pool.find((p) => p.PlayerID === playerId);
     if (preferredPlayer) {
+      console.log(`Selecting preferred player ${preferredPlayer.Name} (ID: ${playerId}) for user ${userId}`);
       return preferredPlayer;
     }
   }
-  return room.pool[0]; // fallback to the first available player
+  
+  // If no preferred players are available, select the first available player
+  const fallbackPlayer = room.pool[0];
+  if (!fallbackPlayer) {
+    throw new Error('No players available for selection');
+  }
+  
+  console.log(`Selecting fallback player ${fallbackPlayer.Name} (ID: ${fallbackPlayer.PlayerID}) for user ${userId}`);
+  return fallbackPlayer;
 }
 
 function generatePlayerPool(callback) {

@@ -1101,3 +1101,12 @@
     margin-bottom: 20px;
   }
   
+/* Fade-out animation for player card removal */
+.player-card {
+  transition: opacity 0.5s;
+  opacity: 1;
+}
+.player-card.removing {
+  opacity: 0;
+}
+  
