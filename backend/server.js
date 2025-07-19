@@ -33,7 +33,6 @@ const rooms = {};
 // const API_URL = 'https://api.sportsdata.io/v3/nfl/scores/json/PlayersByAvailable';
 // const API_KEY = 'b4197e932fce4f46b064f4af2f22bc98';
 const localPlayers = require('./PlayerDetails.json');
-
 // Create Room
 app.post('/api/create-room', async (req, res) => {
   try {
