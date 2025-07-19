@@ -3,7 +3,7 @@ const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const { Server } = require('socket.io');
-const setupSocket = require('./socketHandler');
+const {setupSocket} = require('./socketHandler');
 const fs = require('fs');
 const path = require('path');
 const csv = require('csv-parser');
@@ -30,15 +30,15 @@ app.use(express.json());
 const rooms = {};
 
 // API configuration
-const API_URL = 'https://api.sportsdata.io/v3/nfl/scores/json/PlayersByAvailable';
-const API_KEY = 'b4197e932fce4f46b064f4af2f22bc98';
-
+// const API_URL = 'https://api.sportsdata.io/v3/nfl/scores/json/PlayersByAvailable';
+// const API_KEY = 'b4197e932fce4f46b064f4af2f22bc98';
+const localPlayers = require('./PlayerDetails.json');
 // Create Room
 app.post('/api/create-room', async (req, res) => {
   try {
     const roomId = generateRoomId();
     const playerPool = await generatePlayerPool();
-
+    console.log(`Room ${roomId} created with player pool size: ${playerPool.length}`);
     rooms[roomId] = {
       hostId: null,
       users: [],
@@ -108,19 +108,13 @@ function generateRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// Fixed API call - using headers instead of params
+// Replace generatePlayerPool to use only localPlayers
 async function generatePlayerPool() {
   try {
-    const response = await axios.get(API_URL, {
-      headers: {
-        'Ocp-Apim-Subscription-Key': API_KEY
-      }
-    });
-
-    const rawPlayers = response.data;
-    console.log(`✅ Loaded ${rawPlayers.length} players from SportsDataIO API`);
-
-    // Filter and create a balanced pool similar to socketHandler
+    // Only use localPlayers, do not use axios or any API
+    const rawPlayers = localPlayers;
+    console.log(`✅ Loaded ${rawPlayers.length} players from local JSON file`);
+    // Filter and create a balanced pool
     const positionGroups = {
       QB: [],
       RB: [],
@@ -129,8 +123,6 @@ async function generatePlayerPool() {
       K: [],
       DST: []
     };
-
-    // Filter players into positions
     for (const player of rawPlayers) {
       const pos = player.Position;
       if (pos === "QB") positionGroups.QB.push(player);
@@ -140,10 +132,7 @@ async function generatePlayerPool() {
       else if (pos === "K") positionGroups.K.push(player);
       else if (pos === "DST") positionGroups.DST.push(player);
     }
-
-    // Create a balanced pool
     const getRandom = (arr, count) => arr.sort(() => 0.5 - Math.random()).slice(0, count);
-
     const pool = [
       ...getRandom(positionGroups.QB, 8),
       ...getRandom(positionGroups.RB, 15),
@@ -152,15 +141,10 @@ async function generatePlayerPool() {
       ...getRandom(positionGroups.K, 5),
       ...getRandom(positionGroups.DST, 5)
     ];
-
     console.log(`✅ Created balanced pool with ${pool.length} players`);
     return pool;
-
   } catch (error) {
-    console.error("❌ Error fetching player data from API:", error.message);
-    console.error("Error details:", error.response?.data || error.message);
-    
-    // Return empty array if API fails
+    console.error("❌ Error loading player data from local file:", error.message);
     return [];
   }
 }
@@ -187,4 +171,8 @@ process.on('uncaughtException', (error) => {
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+app.get('/api/players', (req, res) => {
+  res.json(localPlayers);
 });

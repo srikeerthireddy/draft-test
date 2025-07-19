@@ -85,8 +85,8 @@ const App = () => {
 
   // Set preferred players
   const setPreferredPlayers = () => {
-    if (preferred.length !== 7) {
-      setError("Please select exactly 7 preferred players (5 main + 2 bench)");
+    if (preferred.length === 0) {
+      setError("Please select at least one preferred player");
       return;
     }
     console.log("📤 Sending preferred players:", preferred);
@@ -135,7 +135,6 @@ const App = () => {
     if (preferred.includes(playerID)) {
       setPreferred(preferred.filter((id) => id !== playerID));
     } else {
-      if (preferred.length >= 7) return;
       setPreferred([...preferred, playerID]);
     }
   };
@@ -238,6 +237,7 @@ const App = () => {
     // FIXED: Handle draft-started event properly
     socket.on("draft-started", (data) => {
       console.log("🎯 Draft Started", data);
+      console.log("Draft started, pool size:", data.pool?.length);
       setGameStarted(true);
 
       if (data.pool) setPool(data.pool);
@@ -255,7 +255,14 @@ const App = () => {
       }
 
       setTurnTimer(30); // Default 30 seconds
-      setSuccess("Draft has started!");
+      setSuccess("Draft has started! Select your player.");
+      // Scroll to player selection area
+      setTimeout(() => {
+        const selectionSection = document.getElementById('selection-section');
+        if (selectionSection) {
+          selectionSection.scrollIntoView({ behavior: 'smooth' });
+        }
+      }, 100);
     });
 
     // Turn events
@@ -732,9 +739,9 @@ const App = () => {
 
       {/* Pre-Game: Set Preferences */}
       {!gameStarted && (
-        <div style={{ marginBottom: '2rem' }}>
-          <h3>⭐ Set Your Preferences ({preferred.length}/7)</h3>
-          <p>Select exactly 7 players in order of preference (5 main + 2 bench)</p>
+        <div id="preferences-section" style={{ marginBottom: '2rem' }}>
+          <h3>⭐ Set Your Preferences ({preferred.length})</h3>
+          <p>Select as many players as you like in order of preference</p>
           {pool.length === 0 ? (
             <div style={{ 
               backgroundColor: '#fff3cd', 
@@ -774,7 +781,7 @@ const App = () => {
                   }}>{position}</h4>
                   {poolByPosition[position].map(player => {
                     const isSelected = preferred.includes(player.PlayerID);
-                    const isDisabled = !isSelected && preferred.length >= 7;
+                    const isDisabled = false;
                     const priority = preferred.indexOf(player.PlayerID) + 1;
                     return (
                       <button
@@ -810,7 +817,7 @@ const App = () => {
           {/* Selected Preferences */}
           {preferred.length > 0 && (
             <div style={{ marginBottom: "1rem" }}>
-              <h4>Your Preferences ({preferred.length}/7):</h4>
+              <h4>Your Preferences ({preferred.length}):</h4>
               <ol>
                 {preferredPlayerDetails.map((player, index) => (
                   <li key={player.PlayerID} style={{ marginBottom: "0.25rem" }}>
@@ -827,18 +834,18 @@ const App = () => {
           <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
             <button
               onClick={setPreferredPlayers}
-              disabled={preferred.length !== 7}
+              disabled={preferred.length === 0}
               style={{
                 padding: "0.75rem 1.5rem",
-                backgroundColor: preferred.length === 7 ? "#4caf50" : "#ccc",
+                backgroundColor: preferred.length > 0 ? "#4caf50" : "#ccc",
                 color: "white",
                 border: "none",
                 borderRadius: "4px",
-                cursor: preferred.length === 7 ? "pointer" : "not-allowed",
+                cursor: preferred.length > 0 ? "pointer" : "not-allowed",
                 fontSize: "1rem",
               }}
             >
-              💡 Submit Preferences ({preferred.length}/7)
+              💡 Submit Preferences ({preferred.length})
             </button>
 
             {isHost && (
@@ -876,93 +883,27 @@ const App = () => {
 
       {/* During Game: Player Selection */}
       {gameStarted && (
-        <div style={{ marginBottom: "2rem" }}>
-          <h3>
-            🎯 Current Turn: {turn || "Waiting..."}
-            {isMyTurn && (
-              <span style={{ color: "#c62828" }}> - YOUR TURN!</span>
-            )}
-          </h3>
-          <h4>
-            Phase:{" "}
-            {currentPhase === "main"
-              ? "🎯 Main Players (5)"
-              : "🪑 Bench Players (2)"}
-          </h4>
-
-          {/* My Current Team */}
-          {mySelections.length > 0 && (
-            <div
-              style={{
-                backgroundColor: "#e8f5e8",
-                padding: "1rem",
-                borderRadius: "4px",
-                marginBottom: "1rem",
-              }}
-            >
-              <h4>🎯 Your Team ({mySelections.length})</h4>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
-                {mySelections.map((player, index) => (
-                  <span
-                    key={player.PlayerID}
-                    style={{
-                      backgroundColor: "#4caf50",
-                      color: "white",
-                      padding: "0.25rem 0.5rem",
-                      borderRadius: "4px",
-                      fontSize: "0.9rem",
-                    }}
-                  >
-                    {player.Name} ({player.Position})
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-
+        <div id="selection-section" style={{ marginBottom: "2rem" }}>
+          <h3>Player Selection</h3>
           {pool.length === 0 ? (
-            <div
-              style={{
-                backgroundColor: "#fff3cd",
-                padding: "1rem",
-                borderRadius: "4px",
-              }}
-            >
-              <p>⏳ No players available or loading...</p>
+            <div style={{ backgroundColor: '#fff3cd', padding: '1rem', borderRadius: '4px' }}>
+              <p>No players available. Please check your backend player pool.</p>
             </div>
           ) : (
-            <div
-              style={{
-                maxHeight: "400px",
-                overflowY: "auto",
-                border: "1px solid #ccc",
-                borderRadius: "8px",
-                padding: "1rem",
-              }}
-            >
-              <h4>📋 Available Players ({pool.length})</h4>
-              {pool.map((player) => {
-                const isPreferred = preferred.includes(player.PlayerID);
-                return (
-                  <div
-                    key={player.PlayerID}
-                    style={{
-                      margin: "8px 0",
-                      padding: "0.75rem",
-                      backgroundColor: isPreferred ? "#fff3e0" : "white",
-                      border: isPreferred
-                        ? "2px solid #ff9800"
-                        : "1px solid #e0e0e0",
-                      borderRadius: "4px",
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                    }}
-                  >
-                    <span style={{ fontSize: "1rem" }}>
-                      {isPreferred && "⭐ "}
-                      <strong>{player.Name}</strong> - {player.Position}
-                    </span>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #ccc' }}>Name</th>
+                  <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #ccc' }}>Position</th>
+                  <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #ccc' }}>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pool.map(player => (
+                  <tr key={player.PlayerID}>
+                    <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>{player.Name}</td>
+                    <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>{player.Position}</td>
+                    <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>
                     <button
                       onClick={() => selectPlayer(player.PlayerID)}
                       disabled={!isMyTurn}
@@ -977,10 +918,11 @@ const App = () => {
                     >
                       Select
                     </button>
-                  </div>
-                );
-              })}
-            </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </div>
       )}
@@ -1038,6 +980,18 @@ const App = () => {
           </table>
         </div>
       )}
+
+      {/* Show each user's team */}
+      {Object.entries(selections).map(([user, team]) => (
+        <div key={user}>
+          <h4>{user}'s Team</h4>
+          <ul>
+            {team.map(player => (
+              <li key={player.PlayerID}>{player.Name} - {player.Position}</li>
+            ))}
+          </ul>
+        </div>
+      ))}
     </div>
   );
 };
