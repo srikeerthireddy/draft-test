@@ -1,11 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { io } from "socket.io-client";
+import * as Ably from "ably";
 import axios from "axios";
-
-const socket = io("http://localhost:8000", {
-  withCredentials: true,
-  transports: ["websocket"],
-});
 
 const App = () => {
   // Connection state
@@ -13,6 +8,11 @@ const App = () => {
   const [roomId, setRoomId] = useState("");
   const [inRoom, setInRoom] = useState(false);
   const [isHost, setIsHost] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [ably, setAbly] = useState(null);
+  const [channel, setChannel] = useState(null);
+  const [ablyConnectionStatus, setAblyConnectionStatus] = useState("disconnected");
+  const [ablyConnectionDetails, setAblyConnectionDetails] = useState({});
 
   // Game state
   const [users, setUsers] = useState([]);
@@ -37,6 +37,163 @@ const App = () => {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
+  // Add state for chunk assembly
+  const [poolChunks, setPoolChunks] = useState([]);
+  const [poolTotalChunks, setPoolTotalChunks] = useState(0);
+  const [selectionsChunks, setSelectionsChunks] = useState([]);
+  const [selectionsTotalChunks, setSelectionsTotalChunks] = useState(0);
+
+  // Add state for chunked draft started
+  const [draftStartedPoolChunks, setDraftStartedPoolChunks] = useState([]);
+  const [draftStartedPoolTotalChunks, setDraftStartedPoolTotalChunks] = useState(0);
+  const [draftStartedMeta, setDraftStartedMeta] = useState(null);
+
+  // Add state for chunked player-selected
+  const [playerSelectedPoolChunks, setPlayerSelectedPoolChunks] = useState([]);
+  const [playerSelectedPoolTotalChunks, setPlayerSelectedPoolTotalChunks] = useState(0);
+  const [playerSelectedSelectionsChunks, setPlayerSelectedSelectionsChunks] = useState([]);
+  const [playerSelectedSelectionsTotalChunks, setPlayerSelectedSelectionsTotalChunks] = useState(0);
+  const [playerSelectedMeta, setPlayerSelectedMeta] = useState(null);
+
+  // Assemble pool when all chunks are received
+  useEffect(() => {
+    if (poolChunks.length && poolChunks.filter(Boolean).length === poolTotalChunks && poolTotalChunks > 0) {
+      setPool(poolChunks.flat());
+      setPoolChunks([]);
+      setPoolTotalChunks(0);
+    }
+  }, [poolChunks, poolTotalChunks]);
+  // Assemble selections when all chunks are received
+  useEffect(() => {
+    if (selectionsChunks.length && selectionsChunks.filter(Boolean).length === selectionsTotalChunks && selectionsTotalChunks > 0) {
+      const allEntries = selectionsChunks.flat();
+      setSelections(Object.fromEntries(allEntries));
+      setSelectionsChunks([]);
+      setSelectionsTotalChunks(0);
+    }
+  }, [selectionsChunks, selectionsTotalChunks]);
+
+  // Assemble draft started pool and update state
+  useEffect(() => {
+    if (
+      draftStartedPoolChunks.length &&
+      draftStartedPoolChunks.filter(Boolean).length === draftStartedPoolTotalChunks &&
+      draftStartedPoolTotalChunks > 0 &&
+      draftStartedMeta
+    ) {
+      setPool(draftStartedPoolChunks.flat());
+      setTurnOrder(draftStartedMeta.turnOrder);
+      setCurrentPhase(draftStartedMeta.selectionPhase);
+      setGameStarted(true);
+      setTurn(draftStartedMeta.currentUser);
+      setIsMyTurn(draftStartedMeta.currentUser === username);
+      setDraftStartedPoolChunks([]);
+      setDraftStartedPoolTotalChunks(0);
+      setDraftStartedMeta(null);
+    }
+  }, [draftStartedPoolChunks, draftStartedPoolTotalChunks, draftStartedMeta, username]);
+
+  // Assemble player-selected pool and selections and update state
+  useEffect(() => {
+    if (
+      playerSelectedPoolChunks.length &&
+      playerSelectedPoolChunks.filter(Boolean).length === playerSelectedPoolTotalChunks &&
+      playerSelectedPoolTotalChunks > 0 &&
+      playerSelectedSelectionsChunks.length &&
+      playerSelectedSelectionsChunks.filter(Boolean).length === playerSelectedSelectionsTotalChunks &&
+      playerSelectedSelectionsTotalChunks > 0 &&
+      playerSelectedMeta
+    ) {
+      setPool(playerSelectedPoolChunks.flat());
+      const allEntries = playerSelectedSelectionsChunks.flat();
+      setSelections(Object.fromEntries(allEntries));
+      setSuccess(`${playerSelectedMeta.selectedBy} selected ${playerSelectedMeta.player.Name}`);
+      setPlayerSelectedPoolChunks([]);
+      setPlayerSelectedPoolTotalChunks(0);
+      setPlayerSelectedSelectionsChunks([]);
+      setPlayerSelectedSelectionsTotalChunks(0);
+      setPlayerSelectedMeta(null);
+    }
+  }, [playerSelectedPoolChunks, playerSelectedPoolTotalChunks, playerSelectedSelectionsChunks, playerSelectedSelectionsTotalChunks, playerSelectedMeta]);
+
+  // Initialize Ably connection
+  useEffect(() => {
+    const initAbly = async () => {
+      try {
+        // Generate a unique client ID
+        const newClientId = `client_${Math.random().toString(36).substring(2, 15)}`;
+        setClientId(newClientId);
+
+        // Initialize Ably with token callback
+        const ablyInstance = new Ably.Realtime({
+          authCallback: async (tokenParams, callback) => {
+            try {
+              const response = await axios.post('http://localhost:8000/api/ably-token', {
+                clientId: newClientId
+              });
+              callback(null, response.data);
+            } catch (err) {
+              callback(err);
+            }
+          }
+        });
+
+        setAbly(ablyInstance);
+
+        // Handle connection events with detailed status
+        ablyInstance.connection.on('connected', () => {
+          console.log('🔗 Connected to Ably');
+          setAblyConnectionStatus('connected');
+          setAblyConnectionDetails({
+            connectionId: ablyInstance.connection.id,
+            clientId: ablyInstance.auth.clientId,
+            timestamp: new Date().toISOString()
+          });
+        });
+
+        ablyInstance.connection.on('disconnected', () => {
+          console.log('🔌 Disconnected from Ably');
+          setAblyConnectionStatus('disconnected');
+        });
+
+        ablyInstance.connection.on('failed', (err) => {
+          console.error('❌ Ably connection failed:', err);
+          setAblyConnectionStatus('failed');
+          setAblyConnectionDetails({ error: err.message });
+          setError('Connection failed. Please refresh the page.');
+        });
+
+        ablyInstance.connection.on('connecting', () => {
+          console.log('🔄 Connecting to Ably...');
+          setAblyConnectionStatus('connecting');
+        });
+
+        ablyInstance.connection.on('suspended', () => {
+          console.log('⏸️ Ably connection suspended');
+          setAblyConnectionStatus('suspended');
+        });
+
+        ablyInstance.connection.on('closed', () => {
+          console.log('🔒 Ably connection closed');
+          setAblyConnectionStatus('closed');
+        });
+
+      } catch (error) {
+        console.error('Error initializing Ably:', error);
+        setError('Failed to connect to server');
+      }
+    };
+
+    initAbly();
+
+    // Cleanup on unmount
+    return () => {
+      if (ably) {
+        ably.close();
+      }
+    };
+  }, []);
+
   // Clear messages after 3 seconds
   useEffect(() => {
     if (error) {
@@ -53,17 +210,158 @@ const App = () => {
   }, [success]);
 
   // Join room
-  const joinRoom = () => {
+  const joinRoom = async () => {
     if (!username.trim() || !roomId.trim()) {
       setError("Please enter both username and room ID");
       return;
     }
-    console.log("🔗 Joining room:", roomId.trim(), "as", username.trim());
-    socket.emit("join-room", {
-      roomId: roomId.trim(),
-      username: username.trim(),
-    });
-    setInRoom(true);
+
+    if (!ably || !clientId) {
+      setError("Connection not ready. Please wait...");
+      return;
+    }
+
+    try {
+      console.log("🔗 Joining room:", roomId.trim(), "as", username.trim());
+      
+      const response = await axios.post('http://localhost:8000/api/join-room', {
+        roomId: roomId.trim(),
+        username: username.trim(),
+        clientId: clientId
+      });
+
+      if (response.data.error) {
+        setError(response.data.error);
+        return;
+      }
+
+      if (response.data.status === 'generating_pool') {
+        setSuccess("Generating player pool... Please wait.");
+        // Poll for room readiness
+        setTimeout(() => joinRoom(), 2000);
+        return;
+      }
+
+      // Subscribe to room channel
+      const roomChannel = ably.channels.get(`draft-room-${roomId.trim()}`);
+      setChannel(roomChannel);
+
+      // Subscribe to channel events
+      roomChannel.subscribe('room-users', (message) => {
+        console.log("👥 Room users updated:", message.data);
+        setUsers(message.data);
+      });
+
+      roomChannel.subscribe('disconnected-users', (message) => {
+        console.log("💔 Disconnected users:", message.data);
+        setDisconnectedUsers(message.data);
+      });
+
+      roomChannel.subscribe('host-status', (message) => {
+        console.log("👑 Host status:", message.data);
+        const { isHost, started, clientId: hostClientId } = message.data;
+        if (clientId === hostClientId) {
+          setIsHost(isHost);
+          setGameStarted(started);
+        }
+      });
+
+      // Subscribe to chunked pool
+      roomChannel.subscribe('game-state-pool', (message) => {
+        const { chunk, chunkIndex, totalChunks } = message.data;
+        setPoolChunks(prev => {
+          const next = [...prev];
+          next[chunkIndex] = chunk;
+          return next;
+        });
+        setPoolTotalChunks(totalChunks);
+      });
+      // Subscribe to chunked selections
+      roomChannel.subscribe('game-state-selections', (message) => {
+        const { chunk, chunkIndex, totalChunks } = message.data;
+        setSelectionsChunks(prev => {
+          const next = [...prev];
+          next[chunkIndex] = chunk;
+          return next;
+        });
+        setSelectionsTotalChunks(totalChunks);
+      });
+      // Subscribe to meta info
+      roomChannel.subscribe('game-state-meta', (message) => {
+        const { started, selectionPhase, turnOrder, currentTurnIndex, preferredQueue, maxMainPlayers, maxBenchPlayers, clientId: stateClientId } = message.data;
+        if (typeof started === "boolean") setGameStarted(started);
+        if (selectionPhase) setCurrentPhase(selectionPhase);
+        if (turnOrder) setTurnOrder(turnOrder);
+        if (preferredQueue && clientId === stateClientId) setPreferred(Array.isArray(preferredQueue) ? preferredQueue : []);
+        setPreferredQueue(preferredQueue);
+        if (turnOrder && typeof currentTurnIndex === "number") {
+          const currentTurnUser = turnOrder[currentTurnIndex];
+          setTurn(currentTurnUser);
+          setIsMyTurn(currentTurnUser === username);
+        }
+      });
+
+      roomChannel.subscribe('draft-started-pool', (message) => {
+        const { chunk, chunkIndex, totalChunks } = message.data;
+        setDraftStartedPoolChunks(prev => {
+          const next = [...prev];
+          next[chunkIndex] = chunk;
+          return next;
+        });
+        setDraftStartedPoolTotalChunks(totalChunks);
+      });
+      roomChannel.subscribe('draft-started-meta', (message) => {
+        setDraftStartedMeta(message.data);
+      });
+
+      roomChannel.subscribe('turn-started', (message) => {
+        console.log("🎯 Turn started:", message.data);
+        const { currentUser, timeLeft, userId } = message.data;
+        setTurn(currentUser);
+        setIsMyTurn(userId === clientId);
+        setTurnTimer(timeLeft);
+      });
+
+      roomChannel.subscribe('player-selected-pool', (message) => {
+        const { chunk, chunkIndex, totalChunks } = message.data;
+        setPlayerSelectedPoolChunks(prev => {
+          const next = [...prev];
+          next[chunkIndex] = chunk;
+          return next;
+        });
+        setPlayerSelectedPoolTotalChunks(totalChunks);
+      });
+      roomChannel.subscribe('player-selected-selections', (message) => {
+        const { chunk, chunkIndex, totalChunks } = message.data;
+        setPlayerSelectedSelectionsChunks(prev => {
+          const next = [...prev];
+          next[chunkIndex] = chunk;
+          return next;
+        });
+        setPlayerSelectedSelectionsTotalChunks(totalChunks);
+      });
+      roomChannel.subscribe('player-selected-meta', (message) => {
+        setPlayerSelectedMeta(message.data);
+      });
+
+      roomChannel.subscribe('draft-completed', (message) => {
+        console.log("🏁 Draft completed:", message.data);
+        setSuccess("Draft completed! Check final selections.");
+      });
+
+      roomChannel.subscribe('preferred-players-updated', (message) => {
+        console.log("📝 Preferences updated:", message.data);
+        const { message: updateMessage } = message.data;
+        setSuccess(updateMessage);
+      });
+
+      setInRoom(true);
+      setSuccess("Successfully joined room!");
+
+    } catch (error) {
+      console.error('Error joining room:', error);
+      setError("Error joining room: " + (error.response?.data?.error || error.message));
+    }
   };
 
   // Create room
@@ -84,33 +382,75 @@ const App = () => {
   };
 
   // Set preferred players
-  const setPreferredPlayers = () => {
+  const setPreferredPlayers = async () => {
     if (preferred.length === 0) {
       setError("Please select at least one preferred player");
       return;
     }
-    console.log("📤 Sending preferred players:", preferred);
-    socket.emit("set-preferred-players", {
-      roomId,
-      preferredPlayers: preferred,
-    });
+
+    if (!clientId || !roomId) {
+      setError("Not connected to room");
+      return;
+    }
+
+    try {
+      console.log("📤 Sending preferred players:", preferred);
+      const response = await axios.post('http://localhost:8000/api/set-preferred-players', {
+        roomId,
+        clientId,
+        preferredPlayers: preferred,
+      });
+
+      if (response.data.error) {
+        setError(response.data.error);
+        return;
+      }
+
+      setPreferencesSubmitted(true);
+      setSuccess("Preferences submitted successfully!");
+    } catch (error) {
+      setError("Error setting preferences: " + (error.response?.data?.error || error.message));
+    }
   };
 
   // Check if all players have submitted preferences
   const allPreferencesSubmitted = users.length > 0 && users.every(user => user.preferencesSubmitted);
 
   // Select a player during draft
-  const selectPlayer = (playerID) => {
+  const selectPlayer = async (playerID) => {
     if (!isMyTurn) {
       setError("It's not your turn!");
       return;
     }
-    console.log("🎯 Selecting player:", playerID);
-    socket.emit("select-player", { roomId, playerID });
+
+    if (!clientId || !roomId) {
+      setError("Not connected to room");
+      return;
+    }
+
+    try {
+      console.log("🎯 Selecting player:", playerID);
+      // Debug log for POST body
+      console.log({ roomId, clientId, playerID });
+      const response = await axios.post('http://localhost:8000/api/select-player', {
+        roomId,
+        clientId,
+        playerID
+      });
+
+      if (response.data.error) {
+        setError(response.data.error);
+        return;
+      }
+
+      setSuccess("Player selected successfully!");
+    } catch (error) {
+      setError("Error selecting player: " + (error.response?.data?.error || error.message));
+    }
   };
 
-  // Start the draft (host only) - FIXED
-  const startDraft = () => {
+  // Start the draft (host only)
+  const startDraft = async () => {
     console.log("🚀 Start Draft clicked");
 
     if (!isHost) {
@@ -122,12 +462,28 @@ const App = () => {
       setError("All players must submit their preferences first");
       return;
     }
-    console.log("isHost:", isHost);
-    console.log("users.length:", users.length);
-    console.log("allPreferencesSubmitted:", allPreferencesSubmitted);
 
-    console.log("🚀 Starting draft for room:", roomId);
-    socket.emit("start-selection", { roomId });
+    if (!clientId || !roomId) {
+      setError("Not connected to room");
+      return;
+    }
+
+    try {
+      console.log("🚀 Starting draft for room:", roomId);
+      const response = await axios.post('http://localhost:8000/api/start-draft', {
+        roomId,
+        clientId
+      });
+
+      if (response.data.error) {
+        setError(response.data.error);
+        return;
+      }
+
+      setSuccess("Draft started successfully!");
+    } catch (error) {
+      setError("Error starting draft: " + (error.response?.data?.error || error.message));
+    }
   };
 
   // Toggle player in preferred list
@@ -139,310 +495,52 @@ const App = () => {
     }
   };
 
-  // Socket event handlers
+  // Test Ably connection
+  const testAblyConnection = async () => {
+    try {
+      const response = await axios.get('http://localhost:8000/api/ably-test');
+      if (response.data.status === 'success') {
+        setSuccess('Ably connection test successful!');
+        console.log('Ably test response:', response.data);
+      } else {
+        setError('Ably connection test failed');
+      }
+    } catch (error) {
+      setError('Ably connection test failed: ' + (error.response?.data?.error || error.message));
+    }
+  };
+
+  // Get Ably status
+  const getAblyStatus = async () => {
+    try {
+      const response = await axios.get('http://localhost:8000/api/ably-status');
+      console.log('Ably status:', response.data);
+      setSuccess('Ably status: ' + response.data.message);
+    } catch (error) {
+      setError('Failed to get Ably status: ' + (error.response?.data?.error || error.message));
+    }
+  };
+
+  // Handle disconnect
   useEffect(() => {
-    // Connection events
-    socket.on("connect", () => {
-      console.log("🔗 Connected to server");
-    });
-
-    socket.on("disconnect", () => {
-      console.log("🔌 Disconnected from server");
-    });
-
-    // Room events
-    socket.on("room-users", (users) => {
-      console.log("👥 Room users updated:", users);
-      setUsers(users);
-    });
-
-    socket.on("disconnected-users", (disconnectedUsers) => {
-      console.log("💔 Disconnected users:", disconnectedUsers);
-      setDisconnectedUsers(disconnectedUsers);
-    });
-
-    socket.on("host-status", ({ isHost, started }) => {
-      console.log("👑 Host status:", isHost, "Started:", started);
-      setIsHost(isHost);
-      setGameStarted(started);
-    });
-
-    socket.on("room-joined", ({ roomId, username, pool }) => {
-      console.log("✅ Successfully joined room:", roomId, "as", username);
-      setRoomId(roomId);
-      setUsername(username);
-      setPool(pool || []);
-      setSuccess("Successfully joined room!");
-    });
-
-    // Game state events
-    socket.on(
-      "game-state",
-      ({
-        pool,
-        selections,
-        preferredQueue,
-        started,
-        selectionPhase,
-        turnOrder,
-        currentTurnIndex,
-      }) => {
-        console.log("🎮 Game state received:", {
-          poolSize: pool?.length || 0,
-          started,
-          selectionPhase,
-          preferredQueue: preferredQueue ? Object.keys(preferredQueue).length : 0,
-          turnOrder: turnOrder?.length || 0,
-          currentTurnIndex,
-        });
-
-        if (pool) setPool(pool);
-        if (selections) setSelections(selections);
-        // Fix: always set preferred as an array for this user
-        if (preferredQueue) {
-          // Try to find the current user's preferred array by username
-          let userPref = [];
-          if (typeof preferredQueue === 'object' && preferredQueue !== null) {
-            // Try by socket id (not available on frontend), fallback to username
-            const userObj = users.find(u => u.username === username);
-            if (userObj && preferredQueue[userObj.id]) {
-              userPref = preferredQueue[userObj.id];
-            } else if (preferredQueue[username]) {
-              userPref = preferredQueue[username];
-            }
-          } else if (Array.isArray(preferredQueue)) {
-            userPref = preferredQueue;
-          }
-          setPreferred(Array.isArray(userPref) ? userPref : []);
-          setPreferredQueue(preferredQueue);
-        }
-        if (typeof started === "boolean") setGameStarted(started);
-        if (selectionPhase) setCurrentPhase(selectionPhase);
-        if (turnOrder) setTurnOrder(turnOrder);
-
-        // Set current turn based on turn order and index
-        if (turnOrder && typeof currentTurnIndex === "number") {
-          const currentTurnUser = turnOrder[currentTurnIndex];
-          setTurn(currentTurnUser);
-          setIsMyTurn(currentTurnUser === username);
+    const handleBeforeUnload = async () => {
+      if (clientId && roomId) {
+        try {
+          await axios.post('http://localhost:8000/api/disconnect', {
+            roomId,
+            clientId
+          });
+        } catch (error) {
+          console.error('Error disconnecting:', error);
         }
       }
-    );
-
-    socket.on("pool-update", ({ pool }) => {
-      console.log("🏊 Pool updated:", pool.length, "players");
-      setPool(pool);
-    });
-
-    // FIXED: Handle draft-started event properly
-    socket.on("draft-started", (data) => {
-      console.log("🎯 Draft Started", data);
-      console.log("Draft started, pool size:", data.pool?.length);
-      setGameStarted(true);
-
-      if (data.pool) setPool(data.pool);
-      if (data.turnOrder) setTurnOrder(data.turnOrder);
-      if (data.selectionPhase) setCurrentPhase(data.selectionPhase);
-
-      // Set initial turn
-      if (data.currentUser) {
-        setTurn(data.currentUser);
-        setIsMyTurn(data.currentUser === username);
-      } else if (data.turnOrder && data.turnOrder.length > 0) {
-        const firstUser = data.turnOrder[0];
-        setTurn(firstUser);
-        setIsMyTurn(firstUser === username);
-      }
-
-      setTurnTimer(30); // Default 30 seconds
-      setSuccess("Draft has started! Select your player.");
-      // Scroll to player selection area
-      setTimeout(() => {
-        const selectionSection = document.getElementById('selection-section');
-        if (selectionSection) {
-          selectionSection.scrollIntoView({ behavior: 'smooth' });
-        }
-      }, 100);
-    });
-
-    // Turn events
-    socket.on(
-      "turn-update",
-      ({ currentUser, seconds, selectionPhase, userId }) => {
-        console.log("🎯 Turn update:", currentUser, "has", seconds, "seconds");
-        setTurn(currentUser);
-        setTurnTimer(seconds || 30);
-        setIsMyTurn(currentUser === username);
-        if (selectionPhase) setCurrentPhase(selectionPhase);
-      }
-    );
-
-    socket.on(
-      "your-turn",
-      ({ pool, selectionPhase, seconds, selectionsCount, maxPlayers }) => {
-        console.log(
-          "🎲 It's your turn! Phase:",
-          selectionPhase,
-          "Selections:",
-          selectionsCount,
-          "Max:",
-          maxPlayers
-        );
-        if (pool) setPool(pool);
-        if (selectionPhase) setCurrentPhase(selectionPhase);
-        setIsMyTurn(true);
-        setTurnTimer(seconds || 30);
-        setSuccess(
-          `It's your turn! ${
-            selectionPhase === "main" ? "Main" : "Bench"
-          } phase`
-        );
-      }
-    );
-
-    socket.on("turn-order", ({ order }) => {
-      console.log("📋 Turn order:", order);
-      setTurnOrder(order);
-    });
-
-    // Selection events
-    socket.on(
-      "player-selected",
-      ({ selections, pool, player, username: selectedBy, selectionPhase }) => {
-        console.log("✅ Player selected:", player.Name, "by", selectedBy);
-        setSelections(selections);
-        if (pool) setPool(pool);
-        if (selectionPhase) setCurrentPhase(selectionPhase);
-        setIsMyTurn(false);
-        setTurnTimer(0);
-        setSuccess(`${selectedBy} selected ${player.Name}`);
-      }
-    );
-
-    socket.on(
-      "auto-selected",
-      ({ selections, pool, player, username: selectedBy, selectionPhase }) => {
-        console.log("⏰ Auto-selected:", player.Name, "for", selectedBy);
-        setSelections(selections);
-        if (pool) setPool(pool);
-        if (selectionPhase) setCurrentPhase(selectionPhase);
-        setIsMyTurn(false);
-        setTurnTimer(0);
-        setSuccess(`Auto-selected ${player.Name} for ${selectedBy}`);
-      }
-    );
-
-    socket.on(
-      "auto-selected-disconnected",
-      ({ selections, pool, player, username: selectedBy, selectionPhase }) => {
-        console.log(
-          "🔌 Auto-selected for disconnected:",
-          player.Name,
-          "for",
-          selectedBy
-        );
-        setSelections(selections);
-        if (pool) setPool(pool);
-        if (selectionPhase) setCurrentPhase(selectionPhase);
-        setIsMyTurn(false);
-        setTurnTimer(0);
-        setSuccess(
-          `Auto-selected ${player.Name} for disconnected ${selectedBy}`
-        );
-      }
-    );
-
-    // Phase events
-    socket.on("selection-phase-update", ({ phase, message }) => {
-      console.log("🔄 Phase update:", phase, message);
-      setCurrentPhase(phase);
-      setSuccess(message);
-    });
-
-    socket.on("selection-ended", ({ results, finalPhase }) => {
-      console.log("🏁 Selection ended:", results, finalPhase);
-      setGameStarted(false);
-      if (results) setSelections(results);
-      setTurnTimer(0);
-      setIsMyTurn(false);
-      setTurn(null);
-      setSuccess("Draft completed!");
-    });
-
-    // Preference events
-    socket.on("preferred-players-updated", ({ preferredPlayers, message }) => {
-      // Fix: always set preferred as an array
-      setPreferred(Array.isArray(preferredPlayers) ? preferredPlayers : []);
-      setPreferencesSubmitted(true);
-      setSuccess(message);
-    });
-
-    // Play again event
-    socket.on("play-again", ({ pool, phase }) => {
-      console.log("🔄 Play again:", phase);
-      if (pool) setPool(pool);
-      if (phase) setCurrentPhase(phase);
-      setGameStarted(false);
-      setSelections({});
-      setPreferencesSubmitted(false);
-      setPreferred([]);
-      setTurn(null);
-      setIsMyTurn(false);
-      setTurnTimer(0);
-      setTurnOrder([]);
-      setSuccess("Game reset! Set your preferences again.");
-    });
-
-    // Error events
-    socket.on("error", ({ message }) => {
-      console.error("❌ Socket Error:", message);
-      setError(message);
-    });
-
-    socket.on("custom-error", ({ message }) => {
-      console.error("❌ Custom Error:", message);
-      setError(message);
-    });
-
-    socket.on("room-closed", ({ message }) => {
-      console.log("🚪 Room closed:", message);
-      setError(message);
-      setInRoom(false);
-    });
-
-    socket.on("room-not-found", ({ message }) => {
-      console.error("🚫 Room not found:", message);
-      setError(message);
-      setInRoom(false);
-    });
-
-    // Cleanup
-    return () => {
-      socket.off("connect");
-      socket.off("disconnect");
-      socket.off("room-users");
-      socket.off("disconnected-users");
-      socket.off("host-status");
-      socket.off("room-joined");
-      socket.off("game-state");
-      socket.off("pool-update");
-      socket.off("draft-started");
-      socket.off("turn-update");
-      socket.off("your-turn");
-      socket.off("turn-order");
-      socket.off("player-selected");
-      socket.off("auto-selected");
-      socket.off("auto-selected-disconnected");
-      socket.off("selection-phase-update");
-      socket.off("selection-ended");
-      socket.off("preferred-players-updated");
-      socket.off("play-again");
-      socket.off("error");
-      socket.off("custom-error");
-      socket.off("room-closed");
-      socket.off("room-not-found");
     };
-  }, [username, users]);
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [clientId, roomId]);
 
   // Timer countdown effect
   useEffect(() => {
@@ -586,6 +684,84 @@ const App = () => {
         <h2>
           🏈 NFL Draft - Room: {roomId} {isHost && "👑"}
         </h2>
+
+        {/* Ably Connection Status */}
+        <div style={{ 
+          marginBottom: "1rem", 
+          padding: "0.5rem", 
+          borderRadius: "4px",
+          backgroundColor: 
+            ablyConnectionStatus === 'connected' ? '#e8f5e8' :
+            ablyConnectionStatus === 'connecting' ? '#fff3cd' :
+            ablyConnectionStatus === 'failed' ? '#ffebee' :
+            ablyConnectionStatus === 'suspended' ? '#fff3cd' :
+            '#f5f5f5',
+          border: `1px solid ${
+            ablyConnectionStatus === 'connected' ? '#4caf50' :
+            ablyConnectionStatus === 'connecting' ? '#ff9800' :
+            ablyConnectionStatus === 'failed' ? '#f44336' :
+            ablyConnectionStatus === 'suspended' ? '#ff9800' :
+            '#ccc'
+          }`
+        }}>
+          <strong>Ably Connection:</strong> 
+          <span style={{ 
+            color: 
+              ablyConnectionStatus === 'connected' ? '#2e7d32' :
+              ablyConnectionStatus === 'connecting' ? '#f57c00' :
+              ablyConnectionStatus === 'failed' ? '#c62828' :
+              ablyConnectionStatus === 'suspended' ? '#f57c00' :
+              '#666'
+          }}>
+            {ablyConnectionStatus === 'connected' && '🟢 Connected'}
+            {ablyConnectionStatus === 'connecting' && '🟡 Connecting...'}
+            {ablyConnectionStatus === 'disconnected' && '🔴 Disconnected'}
+            {ablyConnectionStatus === 'failed' && '🔴 Failed'}
+            {ablyConnectionStatus === 'suspended' && '🟡 Suspended'}
+            {ablyConnectionStatus === 'closed' && '🔴 Closed'}
+          </span>
+          {ablyConnectionDetails.connectionId && (
+            <span style={{ marginLeft: "1rem", fontSize: "0.9em", color: "#666" }}>
+              ID: {ablyConnectionDetails.connectionId}
+            </span>
+          )}
+          {ablyConnectionDetails.clientId && (
+            <span style={{ marginLeft: "1rem", fontSize: "0.9em", color: "#666" }}>
+              Client: {ablyConnectionDetails.clientId}
+            </span>
+          )}
+          <div style={{ marginTop: "0.5rem" }}>
+            <button
+              onClick={testAblyConnection}
+              style={{
+                padding: "0.25rem 0.5rem",
+                marginRight: "0.5rem",
+                backgroundColor: "#2196f3",
+                color: "white",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+                fontSize: "0.8em"
+              }}
+            >
+              🧪 Test Connection
+            </button>
+            <button
+              onClick={getAblyStatus}
+              style={{
+                padding: "0.25rem 0.5rem",
+                backgroundColor: "#4caf50",
+                color: "white",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer",
+                fontSize: "0.8em"
+              }}
+            >
+              📊 Get Status
+            </button>
+          </div>
+        </div>
 
         {error && (
           <div

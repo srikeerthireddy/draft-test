@@ -2,8 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
-const { Server } = require('socket.io');
-const {setupSocket} = require('./socketHandler');
+const {setupAbly} = require('./ablyHandler');
 const fs = require('fs');
 const path = require('path');
 const csv = require('csv-parser');
@@ -11,20 +10,21 @@ const axios = require('axios');
 
 const app = express();
 const server = http.createServer(app);
-const allowedOrigin = "http://localhost:3001";
-const io = new Server(server, {
-  cors: {
-    origin: allowedOrigin,
-    methods: ['GET', 'POST'],
-    credentials: true,
-  },
-  transports: ["websocket"], // WebSocket preferred
-});
-
+// Allow both 3000 and 3001 for local dev
+const allowedOrigins = ["http://localhost:3000", "http://localhost:3001"];
 app.use(cors({
-  origin: allowedOrigin,
+  origin: function(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
 }));
+
+// Handle preflight requests for all routes
+app.options('*', cors());
 app.use(express.json());
 
 const rooms = {};
@@ -33,6 +33,11 @@ const rooms = {};
 // const API_URL = 'https://api.sportsdata.io/v3/nfl/scores/json/PlayersByAvailable';
 // const API_KEY = 'b4197e932fce4f46b064f4af2f22bc98';
 const localPlayers = require('./PlayerDetails.json');
+
+// Setup Ably with API key
+const ABLY_API_KEY = 'E_U1fw.iYMzEg:KNoWxsCQgLnZ9_oeCL3VWU0NUD3wUB_nbO2rVez2WnA';
+const ablyHandler = setupAbly(rooms);
+
 // Create Room
 app.post('/api/create-room', async (req, res) => {
   try {
@@ -51,7 +56,7 @@ app.post('/api/create-room', async (req, res) => {
       timer: null,
       createdAt: new Date().toISOString(),
       disconnectedUsers: [],
-      selectionPhase: 'main', // Changed from 'offense' to match socketHandler
+      selectionPhase: 'main', // Changed from 'offense' to match ablyHandler
       maxMainPlayers: 5,      // Changed from maxOffensePlayers
       maxBenchPlayers: 2,     // Changed from maxDefensePlayers
       draftRound: 1,
@@ -95,9 +100,118 @@ app.get('/api/rooms', (req, res) => {
   res.json({ rooms: roomList, total: roomList.length });
 });
 
+// Ably token endpoint for client authentication
+app.post('/api/ably-token', async (req, res) => {
+  const { clientId } = req.body;
+  if (!clientId) {
+    return res.status(400).json({ error: 'Client ID is required' });
+  }
+
+  const Ably = require('ably');
+  const ably = new Ably.Rest({
+    key: ABLY_API_KEY
+  });
+
+  try {
+    const tokenRequest = await ably.auth.createTokenRequest({ clientId });
+    res.json(tokenRequest);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create Ably token', details: err.message });
+  }
+});
+
+// Join room endpoint
+app.post('/api/join-room', (req, res) => {
+  const { roomId, username, clientId } = req.body;
+  
+  if (!roomId || !username || !clientId) {
+    return res.status(400).json({ error: 'Room ID, username, and client ID are required' });
+  }
+
+  const result = ablyHandler.handleJoinRoom(roomId, username, clientId);
+  
+  if (result.error) {
+    return res.status(400).json({ error: result.error });
+  }
+  
+  if (result.status === 'generating_pool') {
+    return res.json({ status: 'generating_pool', message: 'Generating player pool...' });
+  }
+  
+  res.json(result);
+});
+
+// Set preferred players endpoint
+app.post('/api/set-preferred-players', (req, res) => {
+  const { roomId, clientId, preferredPlayers } = req.body;
+  
+  if (!roomId || !clientId || !preferredPlayers) {
+    return res.status(400).json({ error: 'Room ID, client ID, and preferred players are required' });
+  }
+
+  const result = ablyHandler.handleSetPreferredPlayers(roomId, clientId, preferredPlayers);
+  
+  if (result.error) {
+    return res.status(400).json({ error: result.error });
+  }
+  
+  res.json(result);
+});
+
+// Start draft endpoint
+app.post('/api/start-draft', (req, res) => {
+  const { roomId, clientId } = req.body;
+  
+  if (!roomId || !clientId) {
+    return res.status(400).json({ error: 'Room ID and client ID are required' });
+  }
+
+  const result = ablyHandler.handleStartDraft(roomId, clientId);
+  
+  if (result.error) {
+    return res.status(400).json({ error: result.error });
+  }
+  
+  res.json(result);
+});
+
+// Select player endpoint
+app.post('/api/select-player', (req, res) => {
+  const { roomId, clientId, playerID } = req.body;
+  
+  if (!roomId || !clientId || !playerID) {
+    return res.status(400).json({ error: 'Room ID, client ID, and player ID are required' });
+  }
+
+  const result = ablyHandler.handleSelectPlayer(roomId, clientId, playerID);
+  
+  if (result.error) {
+    return res.status(400).json({ error: result.error });
+  }
+  
+  res.json(result);
+});
+
+// Disconnect endpoint
+app.post('/api/disconnect', (req, res) => {
+  const { roomId, clientId } = req.body;
+  
+  if (!roomId || !clientId) {
+    return res.status(400).json({ error: 'Room ID and client ID are required' });
+  }
+
+  const result = ablyHandler.handleDisconnect(roomId, clientId);
+  
+  if (result.error) {
+    return res.status(400).json({ error: result.error });
+  }
+  
+  res.json(result);
+});
+
 app.get('/', (req, res) => {
   res.json({
-    message: '🏈 Real-time NFL Team Selection Backend Running',
+    message: '🏈 Real-time NFL Team Selection Backend Running with Ably',
     activeRooms: Object.keys(rooms).length,
     timestamp: new Date().toISOString()
   });
@@ -114,34 +228,9 @@ async function generatePlayerPool() {
     // Only use localPlayers, do not use axios or any API
     const rawPlayers = localPlayers;
     console.log(`✅ Loaded ${rawPlayers.length} players from local JSON file`);
-    // Filter and create a balanced pool
-    const positionGroups = {
-      QB: [],
-      RB: [],
-      WR: [],
-      TE: [],
-      K: [],
-      DST: []
-    };
-    for (const player of rawPlayers) {
-      const pos = player.Position;
-      if (pos === "QB") positionGroups.QB.push(player);
-      else if (pos === "RB") positionGroups.RB.push(player);
-      else if (pos === "WR") positionGroups.WR.push(player);
-      else if (pos === "TE") positionGroups.TE.push(player);
-      else if (pos === "K") positionGroups.K.push(player);
-      else if (pos === "DST") positionGroups.DST.push(player);
-    }
-    const getRandom = (arr, count) => arr.sort(() => 0.5 - Math.random()).slice(0, count);
-    const pool = [
-      ...getRandom(positionGroups.QB, 8),
-      ...getRandom(positionGroups.RB, 15),
-      ...getRandom(positionGroups.WR, 20),
-      ...getRandom(positionGroups.TE, 10),
-      ...getRandom(positionGroups.K, 5),
-      ...getRandom(positionGroups.DST, 5)
-    ];
-    console.log(`✅ Created balanced pool with ${pool.length} players`);
+    // Use up to 100 players for the pool
+    const pool = rawPlayers.slice(0, 100);
+    console.log(`✅ Created pool with ${pool.length} players (max 100)`);
     return pool;
   } catch (error) {
     console.error("❌ Error loading player data from local file:", error.message);
@@ -149,13 +238,10 @@ async function generatePlayerPool() {
   }
 }
 
-// Setup Socket.IO
-setupSocket(io, rooms);
-
 const PORT = process.env.PORT || 8000;
 
 server.listen(PORT, () => {
-  console.log(`🏈 NFL Team Selection Server running on port ${PORT}`);
+  console.log(`🏈 NFL Team Selection Server running on port ${PORT} with Ably`);
   console.log(`📊 Server started at ${new Date().toISOString()}`);
   console.log(`🌐 Server accessible at http://localhost:${PORT}`);
 });
@@ -175,4 +261,56 @@ process.on('unhandledRejection', (reason, promise) => {
 
 app.get('/api/players', (req, res) => {
   res.json(localPlayers);
+});
+
+// Test Ably connection endpoint
+app.get('/api/ably-test', async (req, res) => {
+  try {
+    const Ably = require('ably');
+    const ably = new Ably.Rest({
+      key: ABLY_API_KEY
+    });
+
+    // Test publishing a message to a test channel
+    const testChannel = ably.channels.get('test-connection');
+    await testChannel.publish('test', { message: 'Connection test successful', timestamp: new Date().toISOString() });
+    
+    res.json({ 
+      status: 'success', 
+      message: 'Ably connection test successful',
+      timestamp: new Date().toISOString(),
+      apiKey: ABLY_API_KEY.substring(0, 10) + '...' // Only show first 10 chars for security
+    });
+  } catch (error) {
+    console.error('Ably connection test failed:', error);
+    res.status(500).json({ 
+      status: 'error', 
+      message: 'Ably connection test failed',
+      error: error.message 
+    });
+  }
+});
+
+// Get Ably connection status
+app.get('/api/ably-status', (req, res) => {
+  try {
+    const Ably = require('ably');
+    const ably = new Ably.Rest({
+      key: ABLY_API_KEY
+    });
+
+    res.json({ 
+      status: 'ready',
+      message: 'Ably REST client initialized successfully',
+      apiKeyConfigured: !!ABLY_API_KEY,
+      apiKeyLength: ABLY_API_KEY ? ABLY_API_KEY.length : 0,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'error', 
+      message: 'Failed to initialize Ably',
+      error: error.message 
+    });
+  }
 });
