@@ -236,9 +236,36 @@ async function generatePlayerPool() {
     const filteredPlayers = rawPlayers.filter(player => allowedPositions.includes(player.Position));
     console.log(`✅ Filtered players to ${filteredPlayers.length} based on allowed positions`);
 
-    // Use up to 100 players for the pool from the filtered list
-    const pool = filteredPlayers.slice(0, 100);
-    console.log(`✅ Created pool with ${pool.length} players (max 100)`);
+    // Group players by position
+    const positionGroups = {};
+    allowedPositions.forEach(pos => {
+      positionGroups[pos] = [];
+    });
+    for (const player of filteredPlayers) {
+      if (positionGroups[player.Position]) {
+        positionGroups[player.Position].push(player);
+      }
+    }
+
+    // --- DEBUG LOGGING ---
+    console.log(`[DEBUG] Found ${positionGroups.DST.length} players with position DST.`);
+    if (positionGroups.DST.length > 0) {
+      console.log(`[DEBUG] First 5 DST players found:`, positionGroups.DST.slice(0, 5).map(p => p.Name));
+    }
+    // --- END DEBUG LOGGING ---
+
+    // Create a balanced pool with a set number of players from each position
+    const getRandom = (arr, count) => arr.sort(() => 0.5 - Math.random()).slice(0, count);
+    const pool = [
+      ...getRandom(positionGroups.QB, 10),
+      ...getRandom(positionGroups.RB, 20),
+      ...getRandom(positionGroups.WR, 25),
+      ...getRandom(positionGroups.TE, 15),
+      ...getRandom(positionGroups.K, 15),
+      ...getRandom(positionGroups.DST, 15)
+    ];
+
+    console.log(`✅ Created balanced pool with ${pool.length} players`);
     return pool;
   } catch (error) {
     console.error("❌ Error loading player data from local file:", error.message);
