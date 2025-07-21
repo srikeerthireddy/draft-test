@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import * as Ably from "ably";
 import axios from "axios";
+// import DraftSimulator from "./DraftSimulator"
 
 const App = () => {
   // Connection state
@@ -1101,6 +1102,88 @@ const App = () => {
             </table>
           )}
         </div>
+      )}
+
+      {/* --- NEW: Show your team with slot assignment after draft started --- */}
+      {gameStarted && (
+        (() => {
+          // Lineup rules for slot assignment
+          const LINEUP = {
+            QB: { main: 1, max: 3 },
+            RB: { main: 2, max: 5 },
+            WR: { main: 3, max: 6 },
+            TE: { main: 1, max: 4 },
+            K:  { main: 1, max: 3 },
+            DST:{ main: 1, max: 3 },
+            FLEX: { main: 1, max: 1 },
+            BENCH: 2
+          };
+          const FLEX_ELIGIBLE = ["RB", "WR", "TE"];
+          // Assign slots to my selections
+          const mySelections = selections[username] || [];
+          const slotCounts = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0, BENCH: 0 };
+          const assigned = [];
+          for (const player of mySelections) {
+            const pos = player.Position;
+            if (slotCounts[pos] < LINEUP[pos].main) {
+              slotCounts[pos]++;
+              assigned.push({ ...player, slot: "Main" });
+              continue;
+            }
+            if (FLEX_ELIGIBLE.includes(pos) && slotCounts.FLEX < LINEUP.FLEX.main) {
+              slotCounts.FLEX++;
+              assigned.push({ ...player, slot: "FLEX" });
+              continue;
+            }
+            if (
+              slotCounts.BENCH < LINEUP.BENCH &&
+              slotCounts[pos] < LINEUP[pos].max
+            ) {
+              slotCounts.BENCH++;
+              slotCounts[pos]++;
+              assigned.push({ ...player, slot: "Bench" });
+              continue;
+            }
+            assigned.push({ ...player, slot: "N/A" });
+          }
+          return (
+            <div style={{ marginTop: "2rem", padding: "1rem", background: "#f5f5f5", borderRadius: 8 }}>
+              <h3>Your Team & Slot Assignment</h3>
+              {assigned.length === 0 ? (
+                <div style={{ color: "#888" }}>No players drafted yet.</div>
+              ) : (
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>Player</th>
+                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>Position</th>
+                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>Slot</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {assigned.map((p, i) => (
+                      <tr key={p.PlayerID}>
+                        <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>{p.Name}</td>
+                        <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>{p.Position}</td>
+                        <td style={{
+                          padding: "0.5rem",
+                          borderBottom: "1px solid #eee",
+                          color:
+                            p.slot === "Main" ? "#2e7d32" :
+                            p.slot === "FLEX" ? "#1976d2" :
+                            p.slot === "Bench" ? "#f57c00" : "#c62828",
+                          fontWeight: "bold"
+                        }}>
+                          {p.slot}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          );
+        })()
       )}
 
       {/* Show all users and their preferred players */}

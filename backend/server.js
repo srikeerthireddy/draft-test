@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const csv = require('csv-parser');
 const axios = require('axios');
-
+const lineupConfigs = require('./lineupConfigs.json');
 
 const app = express();
 const server = http.createServer(app);
@@ -233,6 +233,12 @@ app.post('/api/disconnect', (req, res) => {
 });
 
 
+app.get('/api/lineup-configs', (req, res) => {
+  res.json(lineupConfigs);
+});
+
+
+
 app.get('/', (req, res) => {
   res.json({
     message: '🏈 Real-time NFL Team Selection Backend Running with Ably',
@@ -386,4 +392,37 @@ app.get('/api/ably-status', (req, res) => {
     });
   }
 });
+
+
+function isDraftValid(userSelections, playerToDraft, lineupConfig) {
+  // Count current selections by position
+  const counts = {};
+  for (const pos of lineupConfig.positions.map(p => p.position)) {
+    counts[pos] = 0;
+  }
+  for (const player of userSelections) {
+    let pos = player.Position;
+    if (["RB", "WR", "TE"].includes(pos) && player.isFlex) pos = "FLEX";
+    counts[pos] = (counts[pos] || 0) + 1;
+  }
+
+  // Check max for the position
+  const posConfig = lineupConfig.positions.find(p => p.position === playerToDraft.Position);
+  if (posConfig && counts[playerToDraft.Position] >= posConfig.maxDraftable) {
+    return { valid: false, reason: `Max ${playerToDraft.Position} reached` };
+  }
+
+  // FLEX logic
+  if (["RB", "WR", "TE"].includes(playerToDraft.Position)) {
+    const flexConfig = lineupConfig.positions.find(p => p.position === "FLEX");
+    if (flexConfig && counts["FLEX"] >= flexConfig.maxDraftable) {
+      // Can't add more to FLEX
+      // (You may want to check if this player is being assigned to FLEX or not)
+    }
+  }
+
+  // ...add more rules as needed
+
+  return { valid: true };
+}
 
