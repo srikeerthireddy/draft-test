@@ -228,8 +228,16 @@ async function generatePlayerPool() {
     // Only use localPlayers, do not use axios or any API
     const rawPlayers = localPlayers;
     console.log(`✅ Loaded ${rawPlayers.length} players from local JSON file`);
-    // Use up to 100 players for the pool
-    const pool = rawPlayers.slice(0, 100);
+
+    // Define the positions to be included in the draft
+    const allowedPositions = ['QB', 'RB', 'WR', 'TE', 'K', 'DST'];
+    
+    // Filter players by the allowed positions
+    const filteredPlayers = rawPlayers.filter(player => allowedPositions.includes(player.Position));
+    console.log(`✅ Filtered players to ${filteredPlayers.length} based on allowed positions`);
+
+    // Use up to 100 players for the pool from the filtered list
+    const pool = filteredPlayers.slice(0, 100);
     console.log(`✅ Created pool with ${pool.length} players (max 100)`);
     return pool;
   } catch (error) {
