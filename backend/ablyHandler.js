@@ -182,7 +182,7 @@ function setupAbly(rooms) {
 
       // Broadcast updated room users to all clients
       console.log(`📢 Broadcasting room users for room ${roomId}:`);
-      const usersWithPreferences = getUsersWithPreferencesSubmitted(room);
+      const usersWithPreferences = room.users;
       console.log(`Users in room: ${usersWithPreferences.map(u => u.username).join(', ')}`);
       
       publishToRoom(roomId, "room-users", usersWithPreferences);
@@ -245,23 +245,28 @@ function setupAbly(rooms) {
   function handleSetPreferredPlayers(roomId, clientId, preferredPlayers) {
     const room = rooms[roomId];
     if (!room) {
-      return { error: "Room not found" };
+      return {
+        error: "Room not found"
+      };
     }
 
-    if (room.started) {
-      return { error: "Cannot set preferences after game has started" };
-    }
+    // Allow changes during draft
+    // if (room.started) {
+    //   return { error: "Cannot set preferences after game has started" };
+    // }
 
     // Validate preferred players (should be array of PlayerIDs)
     if (!Array.isArray(preferredPlayers)) {
-      return { error: "Preferred players must be an array" };
+      return {
+        error: "Preferred players must be an array"
+      };
     }
 
     // Filter out invalid PlayerIDs and duplicates
     const validPreferredPlayers = preferredPlayers.filter((playerId, index) => {
-      return typeof playerId === 'number' && 
-             preferredPlayers.indexOf(playerId) === index &&
-             room.pool.some(p => p.PlayerID === playerId);
+      return typeof playerId === 'number' &&
+        preferredPlayers.indexOf(playerId) === index &&
+        room.pool.some(p => p.PlayerID === playerId);
     });
 
     room.preferredQueue[clientId] = validPreferredPlayers;
@@ -277,24 +282,20 @@ function setupAbly(rooms) {
       username: user.username
     });
 
-    // Check if all players have submitted preferences
-    const allPlayersSubmitted = checkAllPreferencesSubmitted(room);
-    console.log(`🔍 All preferences submitted: ${allPlayersSubmitted}`);
-
     // Emit updated user list with preferencesSubmitted flag
-    const usersWithPreferences = getUsersWithPreferencesSubmitted(room);
+    const usersWithPreferences = room.users;
     publishToRoom(roomId, "room-users", usersWithPreferences);
 
     // Send updated game state in chunks
     publishGameStateChunks(roomId, {
-      turnOrder: room.started
-        ? room.turnOrder
-            .map((id) => {
-              const user = room.users.find((u) => u.id === id);
-              return user ? user.username : null;
-            })
-            .filter(Boolean)
-        : [],
+      turnOrder: room.started ?
+        room.turnOrder
+        .map((id) => {
+          const user = room.users.find((u) => u.id === id);
+          return user ? user.username : null;
+        })
+        .filter(Boolean) :
+        [],
       currentTurnIndex: room.currentTurnIndex,
       pool: room.pool || [],
       selections: getSelectionsWithUsernames(room),
@@ -303,10 +304,12 @@ function setupAbly(rooms) {
       preferredQueue: room.preferredQueue,
       maxMainPlayers: room.maxMainPlayers,
       maxBenchPlayers: room.maxBenchPlayers,
-      allPreferencesSubmitted: allPlayersSubmitted
+      // allPreferencesSubmitted: allPlayersSubmitted
     }, clientId);
 
-    return { status: 'success', allPlayersSubmitted };
+    return {
+      status: 'success'
+    };
   }
 
   // Handle starting the draft
@@ -324,10 +327,10 @@ function setupAbly(rooms) {
       return { error: "Need at least 2 players to start" };
     }
 
-    const allPlayersSubmitted = checkAllPreferencesSubmitted(room);
-    if (!allPlayersSubmitted) {
-      return { error: "All players must submit their preferences first" };
-    }
+    // const allPlayersSubmitted = checkAllPreferencesSubmitted(room);
+    // if (!allPlayersSubmitted) {
+    //   return { error: "All players must submit their preferences first" };
+    // }
 
     // Start the draft
     room.started = true;
@@ -389,6 +392,16 @@ function setupAbly(rooms) {
 
     const player = room.pool[playerIndex];
     const user = room.users.find(u => u.id === clientId);
+
+    // Validate position assignment
+    const userSelections = room.selections[clientId] || [];
+    const lineupConfig = require('./lineupConfigs.json')[0];
+    const { isDraftValid } = require('./isDraftValid');
+    const validation = isDraftValid(userSelections, player, lineupConfig);
+    if (!validation.valid || validation.position === 'N/A') {
+      return { error: `No valid roster position available for ${player.Name}` };
+    }
+    player.rosterPosition = validation.position;
 
     // Add player to user's selections
     if (!room.selections[clientId]) {
@@ -620,34 +633,75 @@ function autoSelectForDisconnectedUser(roomId, rooms, userId, username) {
 function selectPlayerForUser(room, userId) {
   if (!room.pool || room.pool.length === 0) return null;
 
+  const userSelections = room.selections[userId] || [];
+  const lineupConfig = require('./lineupConfigs.json')[0];
+  const { isDraftValid } = require('./isDraftValid');
+
+  // Determine which positions still need to meet their minDraftable
+  const positionCounts = {};
+  lineupConfig.positions.forEach(pos => {
+    positionCounts[pos.position] = 0;
+  });
+  userSelections.forEach(player => {
+    const pos = player.rosterPosition || player.Position;
+    if (positionCounts.hasOwnProperty(pos)) {
+      positionCounts[pos]++;
+    }
+  });
+
+  // Find positions where minDraftable is not yet met
+  const neededPositions = lineupConfig.positions
+    .filter(pos => positionCounts[pos.position] < pos.minDraftable)
+    .map(pos => pos.position);
+
+  // Helper to check if a player can fill a needed position
+  function canFillNeededPosition(player) {
+    // FLEX logic: only if FLEX is needed and player is RB/WR/TE
+    if (neededPositions.includes('FLEX') && ['RB', 'WR', 'TE'].includes(player.Position)) return true;
+    return neededPositions.includes(player.Position);
+  }
+
   // Try to select from preferred queue first
   const preferredQueue = room.preferredQueue[userId] || [];
   for (const playerId of preferredQueue) {
     const playerIndex = room.pool.findIndex(p => p.PlayerID === playerId);
     if (playerIndex !== -1) {
       const player = room.pool[playerIndex];
+      if (canFillNeededPosition(player)) {
+        const validation = isDraftValid(userSelections, player, lineupConfig);
+        if (validation.valid && validation.position !== 'N/A') {
+          player.rosterPosition = validation.position;
+          room.pool.splice(playerIndex, 1);
+          if (!room.selections[userId]) {
+            room.selections[userId] = [];
+          }
+          room.selections[userId].push(player);
+          return player;
+        }
+      }
+    }
+  }
+
+  // Fallback to main player pool: only pick players for needed positions
+  const availablePlayers = room.pool.filter(player => canFillNeededPosition(player));
+
+  if (availablePlayers.length > 0) {
+    const player = availablePlayers[0];
+    const validation = isDraftValid(userSelections, player, lineupConfig);
+    if (validation.valid && validation.position !== 'N/A') {
+      player.rosterPosition = validation.position;
+      const playerIndex = room.pool.findIndex(p => p.PlayerID === player.PlayerID);
       room.pool.splice(playerIndex, 1);
-      
       if (!room.selections[userId]) {
         room.selections[userId] = [];
       }
       room.selections[userId].push(player);
-      
       return player;
     }
   }
 
-  // Fallback to random selection
-  const randomIndex = Math.floor(Math.random() * room.pool.length);
-  const player = room.pool[randomIndex];
-  room.pool.splice(randomIndex, 1);
-  
-  if (!room.selections[userId]) {
-    room.selections[userId] = [];
-  }
-  room.selections[userId].push(player);
-  
-  return player;
+  // If no valid player found for needed positions, do not pick anyone
+  return null;
 }
 
 function getSelectionsWithUsernames(room) {
@@ -710,12 +764,12 @@ function generatePlayerPool(callback) {
   }
 }
 
-function getUsersWithPreferencesSubmitted(room) {
-  return room.users.map(user => ({
-    ...user,
-    preferencesSubmitted: !!(room.preferredQueue[user.id] && room.preferredQueue[user.id].length > 0)
-  }));
-}
+// function getUsersWithPreferencesSubmitted(room) {
+//   return room.users.map(user => ({
+//     ...user,
+//     preferencesSubmitted: !!(room.preferredQueue[user.id] && room.preferredQueue[user.id].length > 0)
+//   }));
+// }
 
 function checkAllPreferencesSubmitted(room) {
   return room.users.length > 0 && room.users.every(user => 
