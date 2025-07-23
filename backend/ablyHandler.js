@@ -314,16 +314,21 @@ function setupAbly(rooms) {
 
   // Handle starting the draft
   function handleStartDraft(roomId, clientId) {
+    console.log('[Ably] handleStartDraft called with:', { roomId, clientId });
     const room = rooms[roomId];
     if (!room) {
+      console.log('[Ably] Room not found:', roomId);
       return { error: "Room not found" };
     }
 
+    console.log('[Ably] Room hostId:', room.hostId, 'Users:', room.users.map(u => u.id));
     if (clientId !== room.hostId) {
+      console.log('[Ably] Not host:', clientId, 'Host is:', room.hostId);
       return { error: "Only host can start the draft" };
     }
 
     if (room.users.length < 2) {
+      console.log('[Ably] Not enough users:', room.users.length);
       return { error: "Need at least 2 players to start" };
     }
 
@@ -637,7 +642,7 @@ function selectPlayerForUser(room, userId) {
   const lineupConfig = require('./lineupConfigs.json')[0];
   const { isDraftValid } = require('./isDraftValid');
 
-  // Determine which positions still need to meet their minDraftable
+  // Count current selections by position
   const positionCounts = {};
   lineupConfig.positions.forEach(pos => {
     positionCounts[pos.position] = 0;
@@ -649,16 +654,33 @@ function selectPlayerForUser(room, userId) {
     }
   });
 
-  // Find positions where minDraftable is not yet met
-  const neededPositions = lineupConfig.positions
-    .filter(pos => positionCounts[pos.position] < pos.minDraftable)
-    .map(pos => pos.position);
+  // Find the next open position in lineup order (by minDraftable)
+  let nextOpenPosition = null;
+  for (const posConfig of lineupConfig.positions) {
+    if (positionCounts[posConfig.position] < posConfig.minDraftable) {
+      nextOpenPosition = posConfig.position;
+      break;
+    }
+  }
+  // If all minDraftable are filled, allow any position up to maxDraftable (bench/flex)
+  if (!nextOpenPosition) {
+    for (const posConfig of lineupConfig.positions) {
+      if (positionCounts[posConfig.position] < posConfig.maxDraftable) {
+        nextOpenPosition = posConfig.position;
+        break;
+      }
+    }
+  }
+  if (!nextOpenPosition) {
+    // All positions filled
+    return null;
+  }
 
-  // Helper to check if a player can fill a needed position
-  function canFillNeededPosition(player) {
-    // FLEX logic: only if FLEX is needed and player is RB/WR/TE
-    if (neededPositions.includes('FLEX') && ['RB', 'WR', 'TE'].includes(player.Position)) return true;
-    return neededPositions.includes(player.Position);
+  // Helper to check if a player can fill the next open position
+  function canFillNextPosition(player) {
+    // FLEX logic: only if FLEX is next and player is RB/WR/TE
+    if (nextOpenPosition === 'FLEX' && ['RB', 'WR', 'TE'].includes(player.Position)) return true;
+    return player.Position === nextOpenPosition;
   }
 
   // Try to select from preferred queue first
@@ -667,7 +689,7 @@ function selectPlayerForUser(room, userId) {
     const playerIndex = room.pool.findIndex(p => p.PlayerID === playerId);
     if (playerIndex !== -1) {
       const player = room.pool[playerIndex];
-      if (canFillNeededPosition(player)) {
+      if (canFillNextPosition(player)) {
         const validation = isDraftValid(userSelections, player, lineupConfig);
         if (validation.valid && validation.position !== 'N/A') {
           player.rosterPosition = validation.position;
@@ -682,11 +704,10 @@ function selectPlayerForUser(room, userId) {
     }
   }
 
-  // Fallback to main player pool: only pick players for needed positions
-  const availablePlayers = room.pool.filter(player => canFillNeededPosition(player));
+  // Fallback to main player pool: only pick players for the next open position
+  const availablePlayers = room.pool.filter(player => canFillNextPosition(player));
 
-  if (availablePlayers.length > 0) {
-    const player = availablePlayers[0];
+  for (const player of availablePlayers) {
     const validation = isDraftValid(userSelections, player, lineupConfig);
     if (validation.valid && validation.position !== 'N/A') {
       player.rosterPosition = validation.position;
@@ -700,7 +721,7 @@ function selectPlayerForUser(room, userId) {
     }
   }
 
-  // If no valid player found for needed positions, do not pick anyone
+  // If no valid player found for the next open position, do not pick anyone
   return null;
 }
 

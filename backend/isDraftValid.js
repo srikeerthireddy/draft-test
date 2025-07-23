@@ -1,5 +1,5 @@
 function isDraftValid(userSelections, playerToDraft, lineupConfig) {
-  // Count current selections by position
+  // Count current selections by position and FLEX
   const counts = {
     QB: 0,
     RB: 0,
@@ -17,37 +17,44 @@ function isDraftValid(userSelections, playerToDraft, lineupConfig) {
     }
   });
 
-  // Check if player can fill a position-specific slot
+  // Find position config
   const posConfig = lineupConfig.positions.find(p => p.position === playerToDraft.Position);
-  if (posConfig && counts[playerToDraft.Position] < posConfig.maxDraftable) {
+  const flexConfig = lineupConfig.positions.find(p => p.position === "FLEX");
+
+  // 1. Main slot
+  if (posConfig && counts[playerToDraft.Position] < posConfig.minDraftable) {
     return {
       valid: true,
-      position: playerToDraft.Position
+      position: playerToDraft.Position,
+      slot: 'Main'
     };
   }
 
-  // Check if player can fill a FLEX slot
-  const flexConfig = lineupConfig.positions.find(p => p.position === "FLEX");
-  if (flexConfig && ["RB", "WR", "TE"].includes(playerToDraft.Position) && counts.FLEX < flexConfig.maxDraftable) {
-    const rbConfig = lineupConfig.positions.find(p => p.position === "RB");
-    const wrConfig = lineupConfig.positions.find(p => p.position === "WR");
-    const teConfig = lineupConfig.positions.find(p => p.position === "TE");
-    const flexPlayers = userSelections.filter(p => p.rosterPosition === "FLEX").length;
-    const rbPlayers = userSelections.filter(p => p.Position === "RB").length;
-    const wrPlayers = userSelections.filter(p => p.Position === "WR").length;
-    const tePlayers = userSelections.filter(p => p.Position === "TE").length;
-
-    // Check if FLEX is the only option
-    if (rbPlayers >= rbConfig.maxDraftable &&
-      wrPlayers >= wrConfig.maxDraftable &&
-      tePlayers >= teConfig.maxDraftable) {
-      return {
-        valid: true,
-        position: "FLEX"
-      };
-    }
+  // 2. FLEX slot (RB/WR/TE only, only if main is full)
+  if (
+    flexConfig &&
+    ["RB", "WR", "TE"].includes(playerToDraft.Position) &&
+    counts.FLEX < flexConfig.maxDraftable &&
+    posConfig && counts[playerToDraft.Position] >= posConfig.minDraftable && counts[playerToDraft.Position] < posConfig.maxDraftable
+  ) {
+    // Only assign to FLEX if main is full (minDraftable reached)
+    return {
+      valid: true,
+      position: "FLEX",
+      slot: 'FLEX'
+    };
   }
 
+  // 3. Bench slot (if maxDraftable not reached)
+  if (posConfig && counts[playerToDraft.Position] < posConfig.maxDraftable) {
+    return {
+      valid: true,
+      position: playerToDraft.Position,
+      slot: 'Bench'
+    };
+  }
+
+  // No valid slot
   return {
     valid: false,
     reason: `No open roster spots for ${playerToDraft.Position}`

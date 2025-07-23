@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import * as Ably from "ably";
 import axios from "axios";
 // import DraftSimulator from "./DraftSimulator"
@@ -91,6 +91,7 @@ const App = () => {
       setDraftStartedPoolChunks([]);
       setDraftStartedPoolTotalChunks(0);
       setDraftStartedMeta(null);
+      setSuccess("Draft started! Player pool loaded.");
     }
   }, [draftStartedPoolChunks, draftStartedPoolTotalChunks, draftStartedMeta, username]);
 
@@ -459,11 +460,6 @@ const App = () => {
       return;
     }
 
-    if (!allPreferencesSubmitted) {
-      setError("All players must submit their preferences first");
-      return;
-    }
-
     if (!clientId || !roomId) {
       setError("Not connected to room");
       return;
@@ -481,7 +477,7 @@ const App = () => {
         return;
       }
 
-      setSuccess("Draft started successfully!");
+      setSuccess("Draft started successfully! Waiting for player pool...");
     } catch (error) {
       setError("Error starting draft: " + (error.response?.data?.error || error.message));
     }
@@ -575,6 +571,34 @@ const App = () => {
     acc[player.Position].push(player);
     return acc;
   }, {});
+
+  // --- LIVE PREFERENCE LIST: Send to backend on change (debounced) ---
+  const debounceTimeout = useRef(null);
+
+  // --- DRAG AND DROP for preference reordering ---
+  const dragItem = useRef();
+  const dragOverItem = useRef();
+  const handleDragStart = (index) => { dragItem.current = index; };
+  const handleDragEnter = (index) => { dragOverItem.current = index; };
+  const handleDragEnd = () => {
+    const list = [...preferred];
+    const dragged = list.splice(dragItem.current, 1)[0];
+    list.splice(dragOverItem.current, 0, dragged);
+    setPreferred(list);
+    dragItem.current = null;
+    dragOverItem.current = null;
+  };
+
+  const reloadPlayers = async () => {
+    if (!roomId || !clientId) return;
+    try {
+      // Re-join the room to trigger pool reload
+      await joinRoom();
+      setSuccess("Player pool reloaded!");
+    } catch (err) {
+      setError("Failed to reload player pool.");
+    }
+  };
 
   // Render login screen
   if (!inRoom) {
@@ -914,11 +938,12 @@ const App = () => {
         </div>
       )}
 
-      {/* Pre-Game: Set Preferences */}
-      {!gameStarted && (
+      {/* Preferences: Always visible, even during the draft */}
         <div id="preferences-section" style={{ marginBottom: '2rem' }}>
-          <h3>⭐ Set Your Preferences ({preferred.length})</h3>
-          <p>Select as many players as you like in order of preference</p>
+        <h3>⭐ Your Preferences ({preferred.length})</h3>
+        <p style={{ color: "#1976d2", fontStyle: "italic", marginBottom: 8 }}>
+          You can edit your preference list at any time, even during the draft. Changes are saved automatically.
+        </p>
           {pool.length === 0 ? (
             <div style={{ 
               backgroundColor: '#fff3cd', 
@@ -990,52 +1015,172 @@ const App = () => {
               ))}
             </div>
           )}
-
-          {/* Selected Preferences */}
+        {/* Selected Preferences with drag-and-drop */}
           {preferred.length > 0 && (
             <div style={{ marginBottom: "1rem" }}>
               <h4>Your Preferences ({preferred.length}):</h4>
-              <ol>
+            <ol style={{ paddingLeft: 20 }}>
                 {preferredPlayerDetails.map((player, index) => (
-                  <li key={player.PlayerID} style={{ marginBottom: "0.25rem" }}>
+                <li
+                  key={player.PlayerID}
+                  draggable
+                  onDragStart={() => handleDragStart(index)}
+                  onDragEnter={() => handleDragEnter(index)}
+                  onDragEnd={handleDragEnd}
+                  style={{
+                    marginBottom: "0.25rem",
+                    background: "#f1f8e9",
+                    borderRadius: 4,
+                    padding: "0.25rem 0.5rem",
+                    cursor: "grab",
+                    border: "1px solid #c5e1a5",
+                    display: "flex",
+                    alignItems: "center"
+                  }}
+                >
+                  <span style={{ flex: 1 }}>
                     {player.Name} - {player.Position}
-                    <span style={{ color: "#666" }}>
+                    <span style={{ color: "#666", marginLeft: 8 }}>
                       ({index < 5 ? "Main" : "Bench"})
                     </span>
+                  </span>
+                  <span style={{ color: "#aaa", fontSize: 14, marginLeft: 8 }}>☰</span>
                   </li>
                 ))}
               </ol>
             </div>
           )}
+      </div>
 
+      {/* Pre-Game: Set Preferences */}
+      {!gameStarted && (
+        <div id="preferences-section" style={{ marginBottom: '2rem' }}>
+          {/* This section is now redundant as preferences are always visible */}
+          {/* <h3>⭐ Set Your Preferences ({preferred.length})</h3> */}
+          {/* <p>Select as many players as you like in order of preference. Drag to reorder.</p> */}
+          {/* {pool.length === 0 ? ( */}
+          {/*   <div style={{  */}
+          {/*     backgroundColor: '#fff3cd',  */}
+          {/*     padding: '1rem',  */}
+          {/*     borderRadius: '4px',  */}
+          {/*     marginBottom: '1rem'  */}
+          {/*   }}> */}
+          {/*     <p>⏳ Loading player pool...</p> */}
+          {/*   </div> */}
+          {/* ) : ( */}
+          {/*   <div style={{ */}
+          {/*     display: 'flex', */}
+          {/*     gap: '1rem', */}
+          {/*     flexWrap: 'wrap', */}
+          {/*     marginBottom: '1rem', */}
+          {/*   }}> */}
+          {/*     {Object.keys(poolByPosition).sort().map(position => ( */}
+          {/*       <div key={position} style={{ */}
+          {/*         flex: '1 1 180px', */}
+          {/*         minWidth: '180px', */}
+          {/*         maxWidth: '220px', */}
+          {/*         backgroundColor: '#f9f9f9', */}
+          {/*         border: '1px solid #ccc', */}
+          {/*         borderRadius: '8px', */}
+          {/*         padding: '0.5rem', */}
+          {/*         maxHeight: '320px', */}
+          {/*         overflowY: 'auto', */}
+          {/*       }}> */}
+          {/*         <h4 style={{ */}
+          {/*           margin: '0 0 0.5rem 0', */}
+          {/*           textAlign: 'center', */}
+          {/*           background: '#e3f2fd', */}
+          {/*           borderRadius: '4px', */}
+          {/*           padding: '0.25rem 0', */}
+          {/*           fontSize: '1.1em', */}
+          {/*           letterSpacing: '1px', */}
+          {/*         }}>{position}</h4> */}
+          {/*         {poolByPosition[position].map(player => { */}
+          {/*           const isSelected = preferred.includes(player.PlayerID); */}
+          {/*           const isDisabled = false; */}
+          {/*           const priority = preferred.indexOf(player.PlayerID) + 1; */}
+          {/*           return ( */}
+          {/*             <button */}
+          {/*               key={player.PlayerID} */}
+          {/*               onClick={() => togglePreferred(player.PlayerID)} */}
+          {/*               disabled={isDisabled} */}
+          {/*               style={{ */}
+          {/*                 display: 'block', */}
+          {/*                 width: '100%', */}
+          {/*                 margin: '5px 0', */}
+          {/*                 padding: '0.5rem', */}
+          {/*                 backgroundColor: isSelected ? '#4caf50' : '#fff', */}
+          {/*                 color: isSelected ? 'white' : 'black', */}
+          {/*                 border: isSelected ? '2px solid #45a049' : '1px solid #ddd', */}
+          {/*                 borderRadius: '4px', */}
+          {/*                 cursor: isDisabled ? 'not-allowed' : 'pointer', */}
+          {/*                 textAlign: 'left', */}
+          {/*                 opacity: isDisabled ? 0.5 : 1, */}
+          {/*                 fontWeight: isSelected ? 'bold' : 'normal', */}
+          {/*               }} */}
+          {/*             > */}
+          {/*               {isSelected && `${priority}. `} */}
+          {/*               {player.Name} */}
+          {/*               {isSelected && ' ✅'} */}
+          {/*             </button> */}
+          {/*           ); */}
+          {/*         })} */}
+          {/*       </div> */}
+          {/*     ))} */}
+          {/*   </div> */}
+          {/* )} */}
+
+          {/* Selected Preferences with drag-and-drop */}
+          {/* This section is now redundant as preferences are always visible */}
+          {/* {preferred.length > 0 && ( */}
+          {/*   <div style={{ marginBottom: "1rem" }}> */}
+          {/*     <h4>Your Preferences ({preferred.length}):</h4> */}
+          {/*     <ol style={{ paddingLeft: 20 }}> */}
+          {/*       {preferredPlayerDetails.map((player, index) => ( */}
+          {/*         <li */}
+          {/*           key={player.PlayerID} */}
+          {/*           draggable */}
+          {/*           onDragStart={() => handleDragStart(index)} */}
+          {/*           onDragEnter={() => handleDragEnter(index)} */}
+          {/*           onDragEnd={handleDragEnd} */}
+          {/*           style={{ */}
+          {/*             marginBottom: "0.25rem", */}
+          {/*             background: "#f1f8e9", */}
+          {/*             borderRadius: 4, */}
+          {/*             padding: "0.25rem 0.5rem", */}
+          {/*             cursor: "grab", */}
+          {/*             border: "1px solid #c5e1a5", */}
+          {/*             display: "flex", */}
+          {/*             alignItems: "center" */}
+          {/*           }} */}
+          {/*         > */}
+          {/*           <span style={{ flex: 1 }}> */}
+          {/*             {player.Name} - {player.Position} */}
+          {/*             <span style={{ color: "#666", marginLeft: 8 }}> */}
+          {/*               ({index < 5 ? "Main" : "Bench"}) */}
+          {/*             </span> */}
+          {/*           </span> */}
+          {/*           <span style={{ color: "#aaa", fontSize: 14, marginLeft: 8 }}>☰</span> */}
+          {/*         </li> */}
+          {/*       ))} */}
+          {/*     </ol> */}
+          {/*   </div> */}
+          {/* )} */}
+
+          {/* No submit button! Preferences are live. */}
+          {/* Start Draft button: allow even if preferences are empty */}
           <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
-            <button
-              onClick={setPreferredPlayers}
-              disabled={preferred.length === 0}
-              style={{
-                padding: "0.75rem 1.5rem",
-                backgroundColor: preferred.length > 0 ? "#4caf50" : "#ccc",
-                color: "white",
-                border: "none",
-                borderRadius: "4px",
-                cursor: preferred.length > 0 ? "pointer" : "not-allowed",
-                fontSize: "1rem",
-              }}
-            >
-              💡 Submit Preferences ({preferred.length})
-            </button>
-
             {isHost && (
               <button
                 onClick={startDraft}
-                disabled={users.length < 2 || !allPreferencesSubmitted}
+                disabled={users.length < 2}
                 style={{
                   padding: '0.75rem 1.5rem',
-                  backgroundColor: (users.length >= 2 && allPreferencesSubmitted) ? '#2196f3' : '#ccc',
+                  backgroundColor: (users.length >= 2) ? '#2196f3' : '#ccc',
                   color: 'white',
                   border: 'none',
                   borderRadius: '4px',
-                  cursor: (users.length >= 2 && allPreferencesSubmitted) ? 'pointer' : 'not-allowed',
+                  cursor: (users.length >= 2) ? 'pointer' : 'not-allowed',
                   fontSize: '1rem'
                 }}
               >
@@ -1043,12 +1188,6 @@ const App = () => {
               </button>
             )}
           </div>
-
-          {isHost && users.length >= 2 && !allPreferencesSubmitted && (
-            <p style={{ color: "#f57c00", marginTop: "0.5rem" }}>
-              ⚠️ Waiting for all players to submit their preferences
-            </p>
-          )}
 
           {isHost && users.length < 2 && (
             <p style={{ color: "#f57c00", marginTop: "0.5rem" }}>
