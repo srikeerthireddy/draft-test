@@ -370,71 +370,358 @@ function setupAbly(rooms) {
   }
 
   // Handle player selection
-  function handleSelectPlayer(roomId, clientId, playerID) {
-    const room = rooms[roomId];
-    if (!room) {
-      console.log(`[select-player] Room not found: roomId=${roomId}`);
-      return { error: "Room not found" };
-    }
+ // Handle player selection with preference list priority
+function handleSelectPlayer(roomId, clientId, playerID) {
+  const room = rooms[roomId];
+  if (!room) {
+    console.log(`[select-player] Room not found: roomId=${roomId}`);
+    return { error: "Room not found" };
+  }
 
-    if (!room.started) {
-      console.log(`[select-player] Draft has not started yet: roomId=${roomId}`);
-      return { error: "Draft has not started yet" };
-    }
+  if (!room.started) {
+    console.log(`[select-player] Draft has not started yet: roomId=${roomId}`);
+    return { error: "Draft has not started yet" };
+  }
 
-    const currentTurnUserId = room.turnOrder[room.currentTurnIndex];
-    if (clientId !== currentTurnUserId) {
-      console.log(`[select-player] Not your turn: clientId=${clientId}, expected=${currentTurnUserId}`);
-      return { error: "It's not your turn" };
-    }
+  const currentTurnUserId = room.turnOrder[room.currentTurnIndex];
+  if (clientId !== currentTurnUserId) {
+    console.log(`[select-player] Not your turn: clientId=${clientId}, expected=${currentTurnUserId}`);
+    return { error: "It's not your turn" };
+  }
 
-    // Find the player in the pool
-    const playerIndex = room.pool.findIndex(p => p.PlayerID === playerID);
-    if (playerIndex === -1) {
-      console.log(`[select-player] Player not found in pool: playerID=${playerID}, poolSize=${room.pool.length}`);
-      return { error: "Player not found in pool" };
-    }
+  // Find the player in the pool
+  const playerIndex = room.pool.findIndex(p => p.PlayerID === playerID);
+  if (playerIndex === -1) {
+    console.log(`[select-player] Player not found in pool: playerID=${playerID}, poolSize=${room.pool.length}`);
+    return { error: "Player not found in pool" };
+  }
 
-    const player = room.pool[playerIndex];
-    const user = room.users.find(u => u.id === clientId);
+  const player = room.pool[playerIndex];
+  const user = room.users.find(u => u.id === clientId);
 
-    // Validate position assignment
-    const userSelections = room.selections[clientId] || [];
-    const lineupConfig = require('./lineupConfigs.json')[0];
-    const { isDraftValid } = require('./isDraftValid');
+  // Check if player is in preference list first
+  const preferredQueue = room.preferredQueue[clientId] || [];
+  const isPreferred = preferredQueue.includes(playerID);
+  
+  if (isPreferred) {
+    console.log(`🌟 Player ${player.Name} found in ${user.username}'s preference list`);
+    // Remove from preference list since it's being selected
+    room.preferredQueue[clientId] = preferredQueue.filter(id => id !== playerID);
+  } else {
+    console.log(`📋 Player ${player.Name} selected from main pool by ${user.username}`);
+  }
+
+  // Validate position assignment using the lineup logic
+  const userSelections = room.selections[clientId] || [];
+  const lineupConfig = require('./lineupConfigs.json')[0];
+  const { isDraftValid } = require('./isDraftValid');
+  const validation = isDraftValid(userSelections, player, lineupConfig);
+  
+  if (!validation.valid || validation.position === 'N/A') {
+    console.log(`❌ Invalid selection: ${player.Name} would result in N/A position for ${user.username}`);
+    return { error: `No valid roster position available for ${player.Name}. This would result in an invalid lineup.` };
+  }
+  
+  player.rosterPosition = validation.position;
+
+  // Add player to user's selections
+  if (!room.selections[clientId]) {
+    room.selections[clientId] = [];
+  }
+  room.selections[clientId].push(player);
+
+  // Remove player from pool
+  room.pool.splice(playerIndex, 1);
+
+  console.log(`🎯 ${user.username} selected ${player.Name} (${player.Position}) -> ${player.rosterPosition}${isPreferred ? ' [PREFERRED]' : ''}`);
+
+  // Broadcast selection
+  const channel = ably.channels.get(`draft-room-${roomId}`);
+  publishChunked(channel, 'player-selected-pool', room.pool);
+  publishChunked(channel, 'player-selected-selections', Object.entries(getSelectionsWithUsernames(room)), 10);
+  channel.publish('player-selected-meta', {
+    player,
+    selectedBy: user.username,
+    userId: clientId,
+    autoSelected: false,
+    wasPreferred: isPreferred
+  });
+
+  // Broadcast updated preferences
+  publishToRoom(roomId, "preferred-players-updated", {
+    preferredPlayers: room.preferredQueue[clientId] || [],
+    message: isPreferred ? `${user.username} selected their preferred player ${player.Name}` : `${user.username} selected ${player.Name}`,
+    userId: clientId,
+    username: user.username
+  });
+
+  // Move to next turn
+  moveToNextTurn(roomId, rooms);
+
+  return { status: 'success' };
+}
+
+// Enhanced auto-pick that ensures no N/A positions
+function selectPlayerForUser(room, userId) {
+  if (!room.pool || room.pool.length === 0) return null;
+
+  const userSelections = room.selections[userId] || [];
+  const lineupConfig = require('./lineupConfigs.json')[0];
+  const { isDraftValid } = require('./isDraftValid');
+
+  // Helper: can this player be drafted without resulting in N/A?
+  function canPlayerBeDrafted(player) {
     const validation = isDraftValid(userSelections, player, lineupConfig);
-    if (!validation.valid || validation.position === 'N/A') {
-      return { error: `No valid roster position available for ${player.Name}` };
+    return validation.valid && validation.position !== 'N/A';
+  }
+
+  // 1. Try preferred list, in order, but only if player fills a valid position (not N/A)
+  const preferredQueue = room.preferredQueue[userId] || [];
+  for (const playerId of preferredQueue) {
+    const playerIndex = room.pool.findIndex(p => p.PlayerID === playerId);
+    if (playerIndex !== -1) {
+      const player = room.pool[playerIndex];
+      if (canPlayerBeDrafted(player)) {
+        const validation = isDraftValid(userSelections, player, lineupConfig);
+        player.rosterPosition = validation.position;
+        room.pool.splice(playerIndex, 1);
+        if (!room.selections[userId]) room.selections[userId] = [];
+        room.selections[userId].push(player);
+        // Remove from preference list since it's being auto-selected
+        room.preferredQueue[userId] = preferredQueue.filter(id => id !== playerId);
+        return player;
+      }
     }
+  }
+
+  // 2. Fallback: efficiently filter pool for any valid player for open positions
+  // Get open positions
+  const positionCounts = getPositionCounts(userSelections);
+  const openPositions = getOpenPositions(positionCounts, lineupConfig);
+
+  // Efficiently filter pool for players that can fill open positions and are valid
+  const availablePlayers = room.pool.filter(player => {
+    // Check if player's position matches any open position (including FLEX logic)
+    let positionMatch = false;
+    for (const openPos of openPositions) {
+      if (openPos === 'FLEX') {
+        if (['RB', 'WR', 'TE'].includes(player.Position)) {
+          positionMatch = true;
+          break;
+        }
+      } else if (player.Position === openPos) {
+        positionMatch = true;
+        break;
+      }
+    }
+    return positionMatch && canPlayerBeDrafted(player);
+  });
+
+  // Pick the first valid player from the efficiently filtered list
+  if (availablePlayers.length > 0) {
+    const player = availablePlayers[0];
+    const validation = isDraftValid(userSelections, player, lineupConfig);
     player.rosterPosition = validation.position;
-
-    // Add player to user's selections
-    if (!room.selections[clientId]) {
-      room.selections[clientId] = [];
-    }
-    room.selections[clientId].push(player);
-
-    // Remove player from pool
+    const playerIndex = room.pool.findIndex(p => p.PlayerID === player.PlayerID);
     room.pool.splice(playerIndex, 1);
+    if (!room.selections[userId]) room.selections[userId] = [];
+    room.selections[userId].push(player);
+    return player;
+  }
 
-    console.log(`🎯 ${user.username} selected ${player.Name} (${player.Position})`);
+  // No valid player found
+  return null;
+}
 
-    // Broadcast selection
-    const channel = ably.channels.get(`draft-room-${roomId}`);
+// Helper function to count current positions
+function getPositionCounts(userSelections) {
+  const positionCounts = {
+    QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0
+  };
+  userSelections.forEach(player => {
+    const pos = player.rosterPosition || player.Position;
+    if (positionCounts.hasOwnProperty(pos)) {
+      positionCounts[pos]++;
+    }
+  });
+  return positionCounts;
+}
+
+// Helper function to get open positions based on lineup requirements
+function getOpenPositions(positionCounts, lineupConfig) {
+  const openPositions = [];
+  // Add positions that haven't met minDraftable requirement (starters + required)
+  for (const posConfig of lineupConfig.positions) {
+    const currentCount = positionCounts[posConfig.position] || 0;
+    if (currentCount < posConfig.minDraftable) {
+      openPositions.push(posConfig.position);
+    }
+  }
+  // Add positions that can take more players up to maxDraftable (bench)
+  for (const posConfig of lineupConfig.positions) {
+    const currentCount = positionCounts[posConfig.position] || 0;
+    if (currentCount < posConfig.maxDraftable && !openPositions.includes(posConfig.position)) {
+      openPositions.push(posConfig.position);
+    }
+  }
+  return openPositions;
+}
+
+// Helper function to count current positions
+function getPositionCounts(userSelections) {
+  const positionCounts = {
+    QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0
+  };
+  
+  userSelections.forEach(player => {
+    const pos = player.rosterPosition || player.Position;
+    if (positionCounts.hasOwnProperty(pos)) {
+      positionCounts[pos]++;
+    }
+  });
+  
+  return positionCounts;
+}
+
+// Helper function to get open positions based on lineup requirements
+function getOpenPositions(positionCounts, lineupConfig) {
+  const openPositions = [];
+  
+  // First, add positions that haven't met minDraftable requirement (starters + required)
+  for (const posConfig of lineupConfig.positions) {
+    const currentCount = positionCounts[posConfig.position] || 0;
+    if (currentCount < posConfig.minDraftable) {
+      openPositions.push(posConfig.position);
+    }
+  }
+  
+  // Then, add positions that can take more players up to maxDraftable (bench)
+  for (const posConfig of lineupConfig.positions) {
+    const currentCount = positionCounts[posConfig.position] || 0;
+    if (currentCount < posConfig.maxDraftable && 
+        !openPositions.includes(posConfig.position)) {
+      openPositions.push(posConfig.position);
+    }
+  }
+  
+  return openPositions;
+}
+
+// Enhanced handleSetPreferredPlayers to allow editing during draft
+function handleSetPreferredPlayers(roomId, clientId, preferredPlayers) {
+  const room = rooms[roomId];
+  if (!room) {
+    return {
+      error: "Room not found"
+    };
+  }
+
+  // Allow preference changes during draft (removed the restriction)
+  console.log(`📝 Allowing preference update during draft for room ${roomId}`);
+
+  // Validate preferred players (should be array of PlayerIDs)
+  if (!Array.isArray(preferredPlayers)) {
+    return {
+      error: "Preferred players must be an array"
+    };
+  }
+
+  // Filter out invalid PlayerIDs, duplicates, and already selected players
+  const userSelections = room.selections[clientId] || [];
+  const selectedPlayerIds = userSelections.map(p => p.PlayerID);
+  
+  const validPreferredPlayers = preferredPlayers.filter((playerId, index) => {
+    return typeof playerId === 'number' &&
+      preferredPlayers.indexOf(playerId) === index &&
+      room.pool.some(p => p.PlayerID === playerId) &&
+      !selectedPlayerIds.includes(playerId); // Exclude already selected players
+  });
+
+  room.preferredQueue[clientId] = validPreferredPlayers;
+
+  const user = room.users.find(u => u.id === clientId);
+  console.log(`📝 User ${user?.username} updated preferred players during draft: ${validPreferredPlayers.join(', ')}`);
+
+  // Broadcast preference update to all clients
+  publishToRoom(roomId, "preferred-players-updated", {
+    preferredPlayers: validPreferredPlayers,
+    message: `${user.username} updated their preferences${room.started ? ' during draft' : ''}.`,
+    userId: clientId,
+    username: user.username,
+    duringDraft: room.started
+  });
+
+  // Emit updated user list
+  const usersWithPreferences = room.users;
+  publishToRoom(roomId, "room-users", usersWithPreferences);
+
+  // Send updated game state in chunks
+  publishGameStateChunks(roomId, {
+    turnOrder: room.started ?
+      room.turnOrder
+      .map((id) => {
+        const user = room.users.find((u) => u.id === id);
+        return user ? user.username : null;
+      })
+      .filter(Boolean) :
+      [],
+    currentTurnIndex: room.currentTurnIndex,
+    pool: room.pool || [],
+    selections: getSelectionsWithUsernames(room),
+    started: room.started,
+    selectionPhase: room.selectionPhase || 'main',
+    preferredQueue: room.preferredQueue,
+    maxMainPlayers: room.maxMainPlayers,
+    maxBenchPlayers: room.maxBenchPlayers
+  }, clientId);
+
+  return {
+    status: 'success'
+  };
+}
+
+// Also update the autoSelectForDisconnectedUser function to handle the case where no player is selected
+function autoSelectForDisconnectedUser(roomId, rooms, userId, username) {
+  const room = rooms[roomId];
+  if (!room) return;
+
+  // Clear any existing timer
+  if (room.turnTimer) {
+    clearInterval(room.turnTimer);
+    room.turnTimer = null;
+  }
+
+  console.log(`🤖 Auto-selecting for ${username} in room ${roomId}`);
+
+  const selection = selectPlayerForUser(room, userId);
+  if (selection) {
+    const channel = new (require('ably')).Rest({
+      key: 'E_U1fw.iYMzEg:KNoWxsCQgLnZ9_oeCL3VWU0NUD3wUB_nbO2rVez2WnA'
+    }).channels.get(`draft-room-${roomId}`);
     publishChunked(channel, 'player-selected-pool', room.pool);
     publishChunked(channel, 'player-selected-selections', Object.entries(getSelectionsWithUsernames(room)), 10);
     channel.publish('player-selected-meta', {
-      player,
-      selectedBy: user.username,
-      userId: clientId,
-      autoSelected: false
+      player: selection,
+      selectedBy: username,
+      userId: userId,
+      autoSelected: true
     });
-
-    // Move to next turn
-    moveToNextTurn(roomId, rooms);
-
-    return { status: 'success' };
+  } else {
+    // No valid player could be auto-selected, log this and notify
+    console.log(`⚠️ Could not auto-select any valid player for ${username}`);
+    const channel = new (require('ably')).Rest({
+      key: 'E_U1fw.iYMzEg:KNoWxsCQgLnZ9_oeCL3VWU0NUD3wUB_nbO2rVez2WnA'
+    }).channels.get(`draft-room-${roomId}`);
+    channel.publish('auto-select-failed', {
+      username: username,
+      userId: userId,
+      reason: 'No valid players available for any open roster position'
+    });
   }
+  
+  // Always move to next turn regardless of whether a player was selected
+  moveToNextTurn(roomId, rooms);
+}
 
   // Handle disconnection
   function handleDisconnect(roomId, clientId) {
@@ -635,6 +922,96 @@ function autoSelectForDisconnectedUser(roomId, rooms, userId, username) {
   }
 }
 
+// function selectPlayerForUser(room, userId) {
+//   if (!room.pool || room.pool.length === 0) return null;
+
+//   const userSelections = room.selections[userId] || [];
+//   const lineupConfig = require('./lineupConfigs.json')[0];
+//   const { isDraftValid } = require('./isDraftValid');
+
+//   // Count current selections by position
+//   const positionCounts = {};
+//   lineupConfig.positions.forEach(pos => {
+//     positionCounts[pos.position] = 0;
+//   });
+//   userSelections.forEach(player => {
+//     const pos = player.rosterPosition || player.Position;
+//     if (positionCounts.hasOwnProperty(pos)) {
+//       positionCounts[pos]++;
+//     }
+//   });
+
+//   // Find the next open position in lineup order (by minDraftable)
+//   let nextOpenPosition = null;
+//   for (const posConfig of lineupConfig.positions) {
+//     if (positionCounts[posConfig.position] < posConfig.minDraftable) {
+//       nextOpenPosition = posConfig.position;
+//       break;
+//     }
+//   }
+//   // If all minDraftable are filled, allow any position up to maxDraftable (bench/flex)
+//   if (!nextOpenPosition) {
+//     for (const posConfig of lineupConfig.positions) {
+//       if (positionCounts[posConfig.position] < posConfig.maxDraftable) {
+//         nextOpenPosition = posConfig.position;
+//         break;
+//       }
+//     }
+//   }
+//   if (!nextOpenPosition) {
+//     // All positions filled
+//     return null;
+//   }
+
+//   // Helper to check if a player can fill the next open position
+//   function canFillNextPosition(player) {
+//     // FLEX logic: only if FLEX is next and player is RB/WR/TE
+//     if (nextOpenPosition === 'FLEX' && ['RB', 'WR', 'TE'].includes(player.Position)) return true;
+//     return player.Position === nextOpenPosition;
+//   }
+
+//   // Try to select from preferred queue first
+//   const preferredQueue = room.preferredQueue[userId] || [];
+//   for (const playerId of preferredQueue) {
+//     const playerIndex = room.pool.findIndex(p => p.PlayerID === playerId);
+//     if (playerIndex !== -1) {
+//       const player = room.pool[playerIndex];
+//       if (canFillNextPosition(player)) {
+//         const validation = isDraftValid(userSelections, player, lineupConfig);
+//         if (validation.valid && validation.position !== 'N/A') {
+//           player.rosterPosition = validation.position;
+//           room.pool.splice(playerIndex, 1);
+//           if (!room.selections[userId]) {
+//             room.selections[userId] = [];
+//           }
+//           room.selections[userId].push(player);
+//           return player;
+//         }
+//       }
+//     }
+//   }
+
+//   // Fallback to main player pool: only pick players for the next open position
+//   const availablePlayers = room.pool.filter(player => canFillNextPosition(player));
+
+//   for (const player of availablePlayers) {
+//     const validation = isDraftValid(userSelections, player, lineupConfig);
+//     if (validation.valid && validation.position !== 'N/A') {
+//       player.rosterPosition = validation.position;
+//       const playerIndex = room.pool.findIndex(p => p.PlayerID === player.PlayerID);
+//       room.pool.splice(playerIndex, 1);
+//       if (!room.selections[userId]) {
+//         room.selections[userId] = [];
+//       }
+//       room.selections[userId].push(player);
+//       return player;
+//     }
+//   }
+
+//   // If no valid player found for the next open position, do not pick anyone
+//   return null;
+// }
+// Updated selectPlayerForUser function with better preference list handling
 function selectPlayerForUser(room, userId) {
   if (!room.pool || room.pool.length === 0) return null;
 
@@ -642,89 +1019,428 @@ function selectPlayerForUser(room, userId) {
   const lineupConfig = require('./lineupConfigs.json')[0];
   const { isDraftValid } = require('./isDraftValid');
 
-  // Count current selections by position
-  const positionCounts = {};
-  lineupConfig.positions.forEach(pos => {
-    positionCounts[pos.position] = 0;
-  });
+  // Helper function to validate if a player can be drafted without resulting in N/A
+  function canPlayerBeDrafted(player) {
+    const validation = isDraftValid(userSelections, player, lineupConfig);
+    return validation.valid && validation.position !== 'N/A';
+  }
+
+  let selectedFromPreferences = false;
+  let selectedPlayer = null;
+
+  // Try to select from preferred queue first - skip players that would result in N/A
+  const preferredQueue = room.preferredQueue[userId] || [];
+  for (let i = 0; i < preferredQueue.length; i++) {
+    const playerId = preferredQueue[i];
+    const playerIndex = room.pool.findIndex(p => p.PlayerID === playerId);
+    if (playerIndex !== -1) {
+      const player = room.pool[playerIndex];
+      
+      // Check if this player can be drafted without resulting in N/A
+      if (canPlayerBeDrafted(player)) {
+        const validation = isDraftValid(userSelections, player, lineupConfig);
+        player.rosterPosition = validation.position;
+        room.pool.splice(playerIndex, 1);
+        if (!room.selections[userId]) {
+          room.selections[userId] = [];
+        }
+        room.selections[userId].push(player);
+        
+        // Remove from preference list since it's being auto-selected
+        room.preferredQueue[userId] = preferredQueue.filter(id => id !== playerId);
+        
+        console.log(`✅ Auto-selected preferred player: ${player.Name} (${player.Position}) -> ${validation.position}`);
+        selectedFromPreferences = true;
+        selectedPlayer = player;
+        break;
+      } else {
+        console.log(`⏭️ Skipping preferred player ${player.Name} - would result in N/A position`);
+      }
+    }
+  }
+
+  // If no preferred player was selected, pick from main pool
+  if (!selectedPlayer) {
+    // Get all open positions based on lineup requirements
+    const positionCounts = getPositionCounts(userSelections);
+    const openPositions = getOpenPositions(positionCounts, lineupConfig);
+
+    if (openPositions.length === 0) {
+      console.log(`❌ No open positions available for user ${userId}`);
+      return null;
+    }
+
+    console.log(`🎯 Open positions for auto-pick: ${openPositions.join(', ')}`);
+
+    // Efficiently filter main pool by all open positions at once
+    const availablePlayers = room.pool.filter(player => {
+      // Check if player's position matches any open position
+      let positionMatch = false;
+      
+      for (const openPos of openPositions) {
+        if (openPos === 'FLEX') {
+          // FLEX can accept RB, WR, TE
+          if (['RB', 'WR', 'TE'].includes(player.Position)) {
+            positionMatch = true;
+            break;
+          }
+        } else if (player.Position === openPos) {
+          positionMatch = true;
+          break;
+        }
+      }
+      
+      // Only include if position matches and can be drafted without N/A
+      return positionMatch && canPlayerBeDrafted(player);
+    });
+
+    console.log(`🔍 Found ${availablePlayers.length} available players for open positions`);
+
+    // Pick the first valid player from the efficiently filtered list
+    for (const player of availablePlayers) {
+      const validation = isDraftValid(userSelections, player, lineupConfig);
+      if (validation.valid && validation.position !== 'N/A') {
+        player.rosterPosition = validation.position;
+        const playerIndex = room.pool.findIndex(p => p.PlayerID === player.PlayerID);
+        room.pool.splice(playerIndex, 1);
+        if (!room.selections[userId]) {
+          room.selections[userId] = [];
+        }
+        room.selections[userId].push(player);
+        console.log(`✅ Auto-selected from pool: ${player.Name} (${player.Position}) -> ${validation.position}`);
+        selectedPlayer = player;
+        break;
+      }
+    }
+  }
+
+  // Return both the selected player and whether it was from preferences
+  if (selectedPlayer) {
+    selectedPlayer.wasPreferred = selectedFromPreferences;
+    return selectedPlayer;
+  }
+
+  // If we reach here, no valid player was found
+  console.log(`❌ No valid players found for any open position`);
+  return null;
+}
+
+// Updated autoSelectForDisconnectedUser function with proper preference list updates
+function autoSelectForDisconnectedUser(roomId, rooms, userId, username) {
+  const room = rooms[roomId];
+  if (!room) return;
+
+  // Clear any existing timer
+  if (room.turnTimer) {
+    clearInterval(room.turnTimer);
+    room.turnTimer = null;
+  }
+
+  console.log(`🤖 Auto-selecting for ${username} in room ${roomId}`);
+
+  const selection = selectPlayerForUser(room, userId);
+  if (selection) {
+    const channel = new (require('ably')).Rest({
+      key: 'E_U1fw.iYMzEg:KNoWxsCQgLnZ9_oeCL3VWU0NUD3wUB_nbO2rVez2WnA'
+    }).channels.get(`draft-room-${roomId}`);
+    
+    // Publish updated pool and selections
+    publishChunked(channel, 'player-selected-pool', room.pool);
+    publishChunked(channel, 'player-selected-selections', Object.entries(getSelectionsWithUsernames(room)), 10);
+    
+    // Publish selection with preference information
+    channel.publish('player-selected-meta', {
+      player: selection,
+      selectedBy: username,
+      userId: userId,
+      autoSelected: true,
+      wasPreferred: selection.wasPreferred || false
+    });
+
+    // If it was a preferred player, broadcast the updated preference list
+    if (selection.wasPreferred) {
+      channel.publish("preferred-players-updated", {
+        preferredPlayers: room.preferredQueue[userId] || [],
+        message: `${username} auto-selected their preferred player ${selection.Name}`,
+        userId: userId,
+        username: username,
+        autoSelected: true
+      });
+
+      // Send updated game state chunks to reflect preference changes
+      publishGameStateChunks(roomId, {
+        turnOrder: room.started ?
+          room.turnOrder
+          .map((id) => {
+            const user = room.users.find((u) => u.id === id);
+            return user ? user.username : null;
+          })
+          .filter(Boolean) :
+          [],
+        currentTurnIndex: room.currentTurnIndex,
+        pool: room.pool || [],
+        selections: getSelectionsWithUsernames(room),
+        started: room.started,
+        selectionPhase: room.selectionPhase || 'main',
+        preferredQueue: room.preferredQueue,
+        maxMainPlayers: room.maxMainPlayers,
+        maxBenchPlayers: room.maxBenchPlayers
+      });
+    }
+  } else {
+    // No valid player could be auto-selected, log this and notify
+    console.log(`⚠️ Could not auto-select any valid player for ${username}`);
+    const channel = new (require('ably')).Rest({
+      key: 'E_U1fw.iYMzEg:KNoWxsCQgLnZ9_oeCL3VWU0NUD3wUB_nbO2rVez2WnA'
+    }).channels.get(`draft-room-${roomId}`);
+    channel.publish('auto-select-failed', {
+      username: username,
+      userId: userId,
+      reason: 'No valid players available for any open roster position'
+    });
+  }
+  
+  // Always move to next turn regardless of whether a player was selected
+  moveToNextTurn(roomId, rooms);
+}
+
+// Helper function to count current positions
+function getPositionCounts(userSelections) {
+  const positionCounts = {
+    QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0
+  };
+  
   userSelections.forEach(player => {
     const pos = player.rosterPosition || player.Position;
     if (positionCounts.hasOwnProperty(pos)) {
       positionCounts[pos]++;
     }
   });
-
-  // Find the next open position in lineup order (by minDraftable)
-  let nextOpenPosition = null;
-  for (const posConfig of lineupConfig.positions) {
-    if (positionCounts[posConfig.position] < posConfig.minDraftable) {
-      nextOpenPosition = posConfig.position;
-      break;
-    }
-  }
-  // If all minDraftable are filled, allow any position up to maxDraftable (bench/flex)
-  if (!nextOpenPosition) {
-    for (const posConfig of lineupConfig.positions) {
-      if (positionCounts[posConfig.position] < posConfig.maxDraftable) {
-        nextOpenPosition = posConfig.position;
-        break;
-      }
-    }
-  }
-  if (!nextOpenPosition) {
-    // All positions filled
-    return null;
-  }
-
-  // Helper to check if a player can fill the next open position
-  function canFillNextPosition(player) {
-    // FLEX logic: only if FLEX is next and player is RB/WR/TE
-    if (nextOpenPosition === 'FLEX' && ['RB', 'WR', 'TE'].includes(player.Position)) return true;
-    return player.Position === nextOpenPosition;
-  }
-
-  // Try to select from preferred queue first
-  const preferredQueue = room.preferredQueue[userId] || [];
-  for (const playerId of preferredQueue) {
-    const playerIndex = room.pool.findIndex(p => p.PlayerID === playerId);
-    if (playerIndex !== -1) {
-      const player = room.pool[playerIndex];
-      if (canFillNextPosition(player)) {
-        const validation = isDraftValid(userSelections, player, lineupConfig);
-        if (validation.valid && validation.position !== 'N/A') {
-          player.rosterPosition = validation.position;
-          room.pool.splice(playerIndex, 1);
-          if (!room.selections[userId]) {
-            room.selections[userId] = [];
-          }
-          room.selections[userId].push(player);
-          return player;
-        }
-      }
-    }
-  }
-
-  // Fallback to main player pool: only pick players for the next open position
-  const availablePlayers = room.pool.filter(player => canFillNextPosition(player));
-
-  for (const player of availablePlayers) {
-    const validation = isDraftValid(userSelections, player, lineupConfig);
-    if (validation.valid && validation.position !== 'N/A') {
-      player.rosterPosition = validation.position;
-      const playerIndex = room.pool.findIndex(p => p.PlayerID === player.PlayerID);
-      room.pool.splice(playerIndex, 1);
-      if (!room.selections[userId]) {
-        room.selections[userId] = [];
-      }
-      room.selections[userId].push(player);
-      return player;
-    }
-  }
-
-  // If no valid player found for the next open position, do not pick anyone
-  return null;
+  
+  return positionCounts;
 }
 
+// Helper function to get open positions based on lineup requirements
+function getOpenPositions(positionCounts, lineupConfig) {
+  const openPositions = [];
+  
+  // First, add positions that haven't met minDraftable requirement (starters + required)
+  for (const posConfig of lineupConfig.positions) {
+    const currentCount = positionCounts[posConfig.position] || 0;
+    if (currentCount < posConfig.minDraftable) {
+      openPositions.push(posConfig.position);
+    }
+  }
+  
+  // Then, add positions that can take more players up to maxDraftable (bench)
+  for (const posConfig of lineupConfig.positions) {
+    const currentCount = positionCounts[posConfig.position] || 0;
+    if (currentCount < posConfig.maxDraftable && 
+        !openPositions.includes(posConfig.position)) {
+      openPositions.push(posConfig.position);
+    }
+  }
+  
+  return openPositions;
+}
+
+// Updated handleSelectPlayer to also handle preference removal properly
+function handleSelectPlayer(roomId, clientId, playerID) {
+  const room = rooms[roomId];
+  if (!room) {
+    console.log(`[select-player] Room not found: roomId=${roomId}`);
+    return { error: "Room not found" };
+  }
+
+  if (!room.started) {
+    console.log(`[select-player] Draft has not started yet: roomId=${roomId}`);
+    return { error: "Draft has not started yet" };
+  }
+
+  const currentTurnUserId = room.turnOrder[room.currentTurnIndex];
+  if (clientId !== currentTurnUserId) {
+    console.log(`[select-player] Not your turn: clientId=${clientId}, expected=${currentTurnUserId}`);
+    return { error: "It's not your turn" };
+  }
+
+  // Find the player in the pool
+  const playerIndex = room.pool.findIndex(p => p.PlayerID === playerID);
+  if (playerIndex === -1) {
+    console.log(`[select-player] Player not found in pool: playerID=${playerID}, poolSize=${room.pool.length}`);
+    return { error: "Player not found in pool" };
+  }
+
+  const player = room.pool[playerIndex];
+  const user = room.users.find(u => u.id === clientId);
+
+  // Check if player is in preference list first
+  const preferredQueue = room.preferredQueue[clientId] || [];
+  const isPreferred = preferredQueue.includes(playerID);
+  
+  if (isPreferred) {
+    console.log(`🌟 Player ${player.Name} found in ${user.username}'s preference list`);
+    // Remove from preference list since it's being selected
+    room.preferredQueue[clientId] = preferredQueue.filter(id => id !== playerID);
+  } else {
+    console.log(`📋 Player ${player.Name} selected from main pool by ${user.username}`);
+  }
+
+  // Validate position assignment using the lineup logic
+  const userSelections = room.selections[clientId] || [];
+  const lineupConfig = require('./lineupConfigs.json')[0];
+  const { isDraftValid } = require('./isDraftValid');
+  const validation = isDraftValid(userSelections, player, lineupConfig);
+  
+  if (!validation.valid || validation.position === 'N/A') {
+    console.log(`❌ Invalid selection: ${player.Name} would result in N/A position for ${user.username}`);
+    return { error: `No valid roster position available for ${player.Name}. This would result in an invalid lineup.` };
+  }
+  
+  player.rosterPosition = validation.position;
+
+  // Add player to user's selections
+  if (!room.selections[clientId]) {
+    room.selections[clientId] = [];
+  }
+  room.selections[clientId].push(player);
+
+  // Remove player from pool
+  room.pool.splice(playerIndex, 1);
+
+  console.log(`🎯 ${user.username} selected ${player.Name} (${player.Position}) -> ${player.rosterPosition}${isPreferred ? ' [PREFERRED]' : ''}`);
+
+  // Broadcast selection
+  const channel = ably.channels.get(`draft-room-${roomId}`);
+  publishChunked(channel, 'player-selected-pool', room.pool);
+  publishChunked(channel, 'player-selected-selections', Object.entries(getSelectionsWithUsernames(room)), 10);
+  channel.publish('player-selected-meta', {
+    player,
+    selectedBy: user.username,
+    userId: clientId,
+    autoSelected: false,
+    wasPreferred: isPreferred
+  });
+
+  // Broadcast updated preferences if a preferred player was selected
+  publishToRoom(roomId, "preferred-players-updated", {
+    preferredPlayers: room.preferredQueue[clientId] || [],
+    message: isPreferred ? `${user.username} selected their preferred player ${player.Name}` : `${user.username} selected ${player.Name}`,
+    userId: clientId,
+    username: user.username,
+    wasPreferred: isPreferred
+  });
+
+  // Send updated game state chunks to reflect preference changes
+  publishGameStateChunks(roomId, {
+    turnOrder: room.started ?
+      room.turnOrder
+      .map((id) => {
+        const user = room.users.find((u) => u.id === id);
+        return user ? user.username : null;
+      })
+      .filter(Boolean) :
+      [],
+    currentTurnIndex: room.currentTurnIndex,
+    pool: room.pool || [],
+    selections: getSelectionsWithUsernames(room),
+    started: room.started,
+    selectionPhase: room.selectionPhase || 'main',
+    preferredQueue: room.preferredQueue,
+    maxMainPlayers: room.maxMainPlayers,
+    maxBenchPlayers: room.maxBenchPlayers
+  });
+
+  // Move to next turn
+  moveToNextTurn(roomId, rooms);
+
+  return { status: 'success' };
+}
+
+// Also update the autoSelectForDisconnectedUser function to handle the case where no player is selected
+function autoSelectForDisconnectedUser(roomId, rooms, userId, username) {
+  const room = rooms[roomId];
+  if (!room) return;
+
+  // Clear any existing timer
+  if (room.turnTimer) {
+    clearInterval(room.turnTimer);
+    room.turnTimer = null;
+  }
+
+  console.log(`🤖 Auto-selecting for ${username} in room ${roomId}`);
+
+  const selection = selectPlayerForUser(room, userId);
+  if (selection) {
+    const channel = new (require('ably')).Rest({
+      key: 'E_U1fw.iYMzEg:KNoWxsCQgLnZ9_oeCL3VWU0NUD3wUB_nbO2rVez2WnA'
+    }).channels.get(`draft-room-${roomId}`);
+    publishChunked(channel, 'player-selected-pool', room.pool);
+    publishChunked(channel, 'player-selected-selections', Object.entries(getSelectionsWithUsernames(room)), 10);
+    channel.publish('player-selected-meta', {
+      player: selection,
+      selectedBy: username,
+      userId: userId,
+      autoSelected: true
+    });
+  } else {
+    // No valid player could be auto-selected, log this and notify
+    console.log(`⚠️ Could not auto-select any valid player for ${username}`);
+    const channel = new (require('ably')).Rest({
+      key: 'E_U1fw.iYMzEg:KNoWxsCQgLnZ9_oeCL3VWU0NUD3wUB_nbO2rVez2WnA'
+    }).channels.get(`draft-room-${roomId}`);
+    channel.publish('auto-select-failed', {
+      username: username,
+      userId: userId,
+      reason: 'No valid players available for any open roster position'
+    });
+  }
+  
+  // Always move to next turn regardless of whether a player was selected
+  moveToNextTurn(roomId, rooms);
+}
+
+// Also update the autoSelectForDisconnectedUser function to handle the case where no player is selected
+function autoSelectForDisconnectedUser(roomId, rooms, userId, username) {
+  const room = rooms[roomId];
+  if (!room) return;
+
+  // Clear any existing timer
+  if (room.turnTimer) {
+    clearInterval(room.turnTimer);
+    room.turnTimer = null;
+  }
+
+  console.log(`🤖 Auto-selecting for ${username} in room ${roomId}`);
+
+  const selection = selectPlayerForUser(room, userId);
+  if (selection) {
+    const channel = new (require('ably')).Rest({
+      key: 'E_U1fw.iYMzEg:KNoWxsCQgLnZ9_oeCL3VWU0NUD3wUB_nbO2rVez2WnA'
+    }).channels.get(`draft-room-${roomId}`);
+    publishChunked(channel, 'player-selected-pool', room.pool);
+    publishChunked(channel, 'player-selected-selections', Object.entries(getSelectionsWithUsernames(room)), 10);
+    channel.publish('player-selected-meta', {
+      player: selection,
+      selectedBy: username,
+      userId: userId,
+      autoSelected: true
+    });
+  } else {
+    // No valid player could be auto-selected, log this and notify
+    console.log(`⚠️ Could not auto-select any valid player for ${username}`);
+    const channel = new (require('ably')).Rest({
+      key: 'E_U1fw.iYMzEg:KNoWxsCQgLnZ9_oeCL3VWU0NUD3wUB_nbO2rVez2WnA'
+    }).channels.get(`draft-room-${roomId}`);
+    channel.publish('auto-select-failed', {
+      username: username,
+      userId: userId,
+      reason: 'No valid players available for any open roster position'
+    });
+  }
+  
+  // Always move to next turn regardless of whether a player was selected
+  moveToNextTurn(roomId, rooms);
+}
 function getSelectionsWithUsernames(room) {
   const selectionsWithUsernames = {};
   for (const [userId, selections] of Object.entries(room.selections)) {

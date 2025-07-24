@@ -418,6 +418,156 @@ const App = () => {
   // Check if all players have submitted preferences
   const allPreferencesSubmitted = users.length > 0 && users.every(user => user.preferencesSubmitted);
 
+  // Check if a player can fit in the lineup
+  const canPlayerFit = (playerPosition, currentSelections) => {
+    const LINEUP = {
+      QB: { main: 1, max: 3 },
+      RB: { main: 2, max: 5 },
+      WR: { main: 3, max: 6 },
+      TE: { main: 1, max: 4 },
+      K:  { main: 1, max: 3 },
+      DST:{ main: 1, max: 3 },
+      FLEX: { main: 1, max: 1 },
+      BENCH: 2
+    };
+    const FLEX_ELIGIBLE = ["RB", "WR", "TE"];
+
+    const slotCounts = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0, BENCH: 0 };
+    
+    // Count current selections using the exact same logic as slot assignment
+    for (const player of currentSelections) {
+      const pos = player.Position;
+      if (slotCounts[pos] < LINEUP[pos].main) {
+        slotCounts[pos]++;
+        continue;
+      }
+      if (FLEX_ELIGIBLE.includes(pos) && slotCounts.FLEX < LINEUP.FLEX.main) {
+        slotCounts.FLEX++;
+        continue;
+      }
+      if (slotCounts.BENCH < LINEUP.BENCH && slotCounts[pos] < LINEUP[pos].max) {
+        slotCounts.BENCH++;
+        slotCounts[pos]++;
+        continue;
+      }
+      // Player is in overflow - count them in position but not in valid slots
+      slotCounts[pos]++;
+    }
+
+    // Check if new player can fit - simulate adding them
+    const pos = playerPosition;
+    
+    // First check if position has reached max limit
+    if (slotCounts[pos] >= LINEUP[pos].max) {
+      return false; // Position is at max capacity
+    }
+    
+    // Try main position first
+    if (slotCounts[pos] < LINEUP[pos].main) {
+      return true; // Can fit in main position
+    }
+    
+    // Try FLEX if eligible
+    if (FLEX_ELIGIBLE.includes(pos) && slotCounts.FLEX < LINEUP.FLEX.main) {
+      return true; // Can fit in FLEX
+    }
+    
+    // Try bench (only if bench has space and position isn't at max)
+    if (slotCounts.BENCH < LINEUP.BENCH && slotCounts[pos] < LINEUP[pos].max) {
+      return true; // Can fit on bench
+    }
+    
+    return false; // Cannot fit anywhere
+  };
+
+  // Auto-select best available player
+  const autoSelectPlayer = async () => {
+    if (!isMyTurn) {
+      setError("It's not your turn!");
+      return;
+    }
+
+    const myCurrentSelections = selections[username] || [];
+    
+    // First, try to select from preferred players that can actually fit (in preference order)
+    for (const preferredPlayerID of preferred) {
+      const preferredPlayer = pool.find(p => p.PlayerID === preferredPlayerID);
+      if (preferredPlayer && canPlayerFit(preferredPlayer.Position, myCurrentSelections)) {
+        console.log(`Auto-selecting preferred player: ${preferredPlayer.Name} (${preferredPlayer.Position}) - Priority #${preferred.indexOf(preferredPlayerID) + 1}`);
+        await selectPlayer(preferredPlayerID);
+        return;
+      } else if (preferredPlayer) {
+        console.log(`Skipping preferred player ${preferredPlayer.Name} (${preferredPlayer.Position}) - no available slots`);
+      }
+    }
+
+    // If no preferred player available, select any player that fits (prioritize by position needs)
+    const LINEUP = {
+      QB: { main: 1, max: 3 },
+      RB: { main: 2, max: 5 },
+      WR: { main: 3, max: 6 },
+      TE: { main: 1, max: 4 },
+      K:  { main: 1, max: 3 },
+      DST:{ main: 1, max: 3 },
+      FLEX: { main: 1, max: 1 },
+      BENCH: 2
+    };
+
+    // Count current positions to prioritize filling main lineup first
+    const slotCounts = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0, BENCH: 0 };
+    const FLEX_ELIGIBLE = ["RB", "WR", "TE"];
+    
+    for (const player of myCurrentSelections) {
+      const pos = player.Position;
+      if (slotCounts[pos] < LINEUP[pos].main) {
+        slotCounts[pos]++;
+        continue;
+      }
+      if (FLEX_ELIGIBLE.includes(pos) && slotCounts.FLEX < LINEUP.FLEX.main) {
+        slotCounts.FLEX++;
+        continue;
+      }
+      if (slotCounts.BENCH < LINEUP.BENCH && slotCounts[pos] < LINEUP[pos].max) {
+        slotCounts.BENCH++;
+        slotCounts[pos]++;
+        continue;
+      }
+      slotCounts[pos]++;
+    }
+
+    // Prioritize positions that need main lineup spots
+    const positionPriority = [];
+    Object.keys(LINEUP).forEach(pos => {
+      if (pos === 'FLEX' || pos === 'BENCH') return;
+      if (slotCounts[pos] < LINEUP[pos].main) {
+        positionPriority.push(pos);
+      }
+    });
+
+    // Try to fill main lineup positions first
+    for (const pos of positionPriority) {
+      for (const player of pool) {
+        if (player.Position === pos && canPlayerFit(player.Position, myCurrentSelections)) {
+          console.log(`Auto-selecting ${player.Name} (${player.Position}) to fill main lineup`);
+          await selectPlayer(player.PlayerID);
+          return;
+        }
+      }
+    }
+
+    // If main lineup is filled, select any available player
+    for (const player of pool) {
+      if (canPlayerFit(player.Position, myCurrentSelections)) {
+        console.log(`Auto-selecting available player: ${player.Name} (${player.Position})`);
+        await selectPlayer(player.PlayerID);
+        return;
+      }
+    }
+
+    // If we reach here, the lineup is full
+    setError("Your lineup is full! No more players can be added.");
+  };
+
   // Select a player during draft
   const selectPlayer = async (playerID) => {
     if (!isMyTurn) {
@@ -427,6 +577,15 @@ const App = () => {
 
     if (!clientId || !roomId) {
       setError("Not connected to room");
+      return;
+    }
+
+    // Check if this player can fit before making the API call
+    const playerToSelect = pool.find(p => p.PlayerID === playerID);
+    const myCurrentSelections = selections[username] || [];
+    
+    if (playerToSelect && !canPlayerFit(playerToSelect.Position, myCurrentSelections)) {
+      setError(`Cannot select ${playerToSelect.Name} - no available slots for ${playerToSelect.Position} position!`);
       return;
     }
 
@@ -1201,6 +1360,153 @@ const App = () => {
       {gameStarted && (
         <div id="selection-section" style={{ marginBottom: "2rem" }}>
           <h3>Player Selection</h3>
+          
+          {/* Lineup Status */}
+          {(() => {
+            const myCurrentSelections = selections[username] || [];
+            const LINEUP = {
+              QB: { main: 1, max: 3 },
+              RB: { main: 2, max: 5 },
+              WR: { main: 3, max: 6 },
+              TE: { main: 1, max: 4 },
+              K:  { main: 1, max: 3 },
+              DST:{ main: 1, max: 3 },
+              FLEX: { main: 1, max: 1 },
+              BENCH: 2
+            };
+            const FLEX_ELIGIBLE = ["RB", "WR", "TE"];
+            const slotCounts = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0, BENCH: 0 };
+            
+            // Count current slots using proper logic
+            for (const player of myCurrentSelections) {
+              const pos = player.Position;
+              
+              // Check if position has reached max limit
+              if (slotCounts[pos] >= LINEUP[pos].max) {
+                continue; // Skip overflow players
+              }
+              
+              if (slotCounts[pos] < LINEUP[pos].main) {
+                slotCounts[pos]++;
+                continue;
+              }
+              if (FLEX_ELIGIBLE.includes(pos) && slotCounts.FLEX < LINEUP.FLEX.main) {
+                slotCounts.FLEX++;
+                continue;
+              }
+              if (slotCounts.BENCH < LINEUP.BENCH && slotCounts[pos] < LINEUP[pos].max) {
+                slotCounts.BENCH++;
+                slotCounts[pos]++;
+                continue;
+              }
+            }
+
+            // Calculate available slots more accurately
+            const availableSlots = [];
+            Object.keys(LINEUP).forEach(pos => {
+              if (pos === 'FLEX' || pos === 'BENCH') return;
+              const available = LINEUP[pos].max - slotCounts[pos];
+              if (available > 0) {
+                const mainNeeded = Math.max(0, LINEUP[pos].main - slotCounts[pos]);
+                const benchAvailable = Math.max(0, available - mainNeeded);
+                if (mainNeeded > 0) {
+                  availableSlots.push(`${pos}: ${mainNeeded} main`);
+                }
+                if (benchAvailable > 0) {
+                  availableSlots.push(`${pos}: ${benchAvailable} bench`);
+                }
+              }
+            });
+            
+            const flexAvailable = LINEUP.FLEX.main - slotCounts.FLEX;
+            const benchAvailable = LINEUP.BENCH - slotCounts.BENCH;
+            
+            if (flexAvailable > 0) availableSlots.push(`FLEX: ${flexAvailable}`);
+            if (benchAvailable > 0) availableSlots.push(`BENCH: ${benchAvailable}`);
+
+            // Count valid players only
+            const validPlayerCount = myCurrentSelections.filter(player => {
+              const tempSlotCounts = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0, BENCH: 0 };
+              let playerCanFit = false;
+              
+              for (const p of myCurrentSelections) {
+                if (p.PlayerID === player.PlayerID) {
+                  const pos = p.Position;
+                  if (tempSlotCounts[pos] >= LINEUP[pos].max) continue;
+                  if (tempSlotCounts[pos] < LINEUP[pos].main) {
+                    tempSlotCounts[pos]++;
+                    playerCanFit = true;
+                  } else if (FLEX_ELIGIBLE.includes(pos) && tempSlotCounts.FLEX < LINEUP.FLEX.main) {
+                    tempSlotCounts.FLEX++;
+                    playerCanFit = true;
+                  } else if (tempSlotCounts.BENCH < LINEUP.BENCH && tempSlotCounts[pos] < LINEUP[pos].max) {
+                    tempSlotCounts.BENCH++;
+                    tempSlotCounts[pos]++;
+                    playerCanFit = true;
+                  }
+                  break;
+                } else {
+                  const pos = p.Position;
+                  if (tempSlotCounts[pos] >= LINEUP[pos].max) continue;
+                  if (tempSlotCounts[pos] < LINEUP[pos].main) {
+                    tempSlotCounts[pos]++;
+                  } else if (FLEX_ELIGIBLE.includes(pos) && tempSlotCounts.FLEX < LINEUP.FLEX.main) {
+                    tempSlotCounts.FLEX++;
+                  } else if (tempSlotCounts.BENCH < LINEUP.BENCH && tempSlotCounts[pos] < LINEUP[pos].max) {
+                    tempSlotCounts.BENCH++;
+                    tempSlotCounts[pos]++;
+                  }
+                }
+              }
+              return playerCanFit;
+            }).length;
+
+            return (
+              <div style={{ 
+                backgroundColor: availableSlots.length === 0 ? '#ffebee' : '#e8f5e8',
+                padding: '0.75rem', 
+                borderRadius: '4px',
+                marginBottom: '1rem',
+                border: `1px solid ${availableSlots.length === 0 ? '#f44336' : '#4caf50'}`
+              }}>
+                <strong>Lineup Status:</strong> {validPlayerCount} valid players selected
+                {availableSlots.length > 0 ? (
+                  <span style={{ marginLeft: '1rem', color: '#2e7d32' }}>
+                    Available: {availableSlots.join(', ')}
+                  </span>
+                ) : (
+                  <span style={{ marginLeft: '1rem', color: '#c62828', fontWeight: 'bold' }}>
+                    🔒 LINEUP FULL - No more selections allowed
+                  </span>
+                )}
+              </div>
+            );
+          })()}
+          
+          {/* Auto-select button */}
+          {isMyTurn && (
+            <div style={{ marginBottom: "1rem" }}>
+              <button
+                onClick={autoSelectPlayer}
+                style={{
+                  padding: "0.75rem 1.5rem",
+                  backgroundColor: "#ff9800",
+                  color: "white",
+                  border: "none",
+                  borderRadius: "4px",
+                  cursor: "pointer",
+                  marginRight: "1rem",
+                  fontSize: "1rem"
+                }}
+              >
+                🤖 Auto-Select Best Available
+              </button>
+              <span style={{ color: "#666", fontSize: "0.9em" }}>
+                (Prioritizes your preferred players, then any available player that fits)
+              </span>
+            </div>
+          )}
+
           {pool.length === 0 ? (
             <div style={{ backgroundColor: '#fff3cd', padding: '1rem', borderRadius: '4px' }}>
               <p>No players available. Please check your backend player pool.</p>
@@ -1211,32 +1517,59 @@ const App = () => {
                 <tr>
                   <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #ccc' }}>Name</th>
                   <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #ccc' }}>Position</th>
+                  <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #ccc' }}>Status</th>
                   <th style={{ textAlign: 'left', padding: '0.5rem', borderBottom: '1px solid #ccc' }}>Action</th>
                 </tr>
               </thead>
               <tbody>
-                {pool.map(player => (
-                  <tr key={player.PlayerID}>
-                    <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>{player.Name}</td>
-                    <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>{player.Position}</td>
-                    <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>
-                    <button
-                      onClick={() => selectPlayer(player.PlayerID)}
-                      disabled={!isMyTurn}
-                      style={{
-                        padding: "0.5rem 1rem",
-                        backgroundColor: isMyTurn ? "#4caf50" : "#ccc",
-                        color: "white",
-                        border: "none",
-                        borderRadius: "4px",
-                        cursor: isMyTurn ? "pointer" : "not-allowed",
-                      }}
-                    >
-                      Select
-                    </button>
-                    </td>
-                  </tr>
-                ))}
+                {pool.map(player => {
+                  const myCurrentSelections = selections[username] || [];
+                  const canFit = canPlayerFit(player.Position, myCurrentSelections);
+                  const isPreferred = preferred.includes(player.PlayerID);
+                  const preferredIndex = preferred.indexOf(player.PlayerID);
+                  
+                  return (
+                    <tr key={player.PlayerID} style={{
+                      backgroundColor: isPreferred ? '#e8f5e8' : 'transparent'
+                    }}>
+                      <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>
+                        {isPreferred && <span style={{ color: '#4caf50', fontWeight: 'bold' }}>⭐ </span>}
+                        {player.Name}
+                        {isPreferred && <span style={{ color: '#666', fontSize: '0.8em' }}> (#{preferredIndex + 1})</span>}
+                      </td>
+                      <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>{player.Position}</td>
+                      <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>
+                        <span style={{
+                          color: canFit ? '#4caf50' : '#f44336',
+                          fontWeight: 'bold',
+                          fontSize: '0.9em'
+                        }}>
+                          {canFit ? '✅ Available' : '❌ No slots'}
+                        </span>
+                      </td>
+                      <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>
+                        <button
+                          onClick={() => selectPlayer(player.PlayerID)}
+                          disabled={!isMyTurn || !canFit}
+                          style={{
+                            padding: "0.5rem 1rem",
+                            backgroundColor: 
+                              !isMyTurn ? "#ccc" :
+                              !canFit ? "#ffcdd2" :
+                              isPreferred ? "#4caf50" : "#2196f3",
+                            color: "white",
+                            border: "none",
+                            borderRadius: "4px",
+                            cursor: (!isMyTurn || !canFit) ? "not-allowed" : "pointer",
+                            opacity: (!isMyTurn || !canFit) ? 0.6 : 1
+                          }}
+                        >
+                          {!canFit ? "Full" : "Select"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           )}
@@ -1258,32 +1591,45 @@ const App = () => {
             BENCH: 2
           };
           const FLEX_ELIGIBLE = ["RB", "WR", "TE"];
-          // Assign slots to my selections
+          // Assign slots to my selections - only include players with valid slots
           const mySelections = selections[username] || [];
           const slotCounts = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0, BENCH: 0 };
           const assigned = [];
+          
           for (const player of mySelections) {
             const pos = player.Position;
+            
+            // Check if position has reached max limit
+            if (slotCounts[pos] >= LINEUP[pos].max) {
+              console.warn(`Player ${player.Name} cannot be assigned - ${pos} position is at max capacity (${LINEUP[pos].max})`);
+              continue; // Skip this player entirely
+            }
+            
+            // Try main position first
             if (slotCounts[pos] < LINEUP[pos].main) {
               slotCounts[pos]++;
               assigned.push({ ...player, slot: "Main" });
               continue;
             }
+            
+            // Try FLEX if eligible
             if (FLEX_ELIGIBLE.includes(pos) && slotCounts.FLEX < LINEUP.FLEX.main) {
               slotCounts.FLEX++;
               assigned.push({ ...player, slot: "FLEX" });
               continue;
             }
-            if (
-              slotCounts.BENCH < LINEUP.BENCH &&
-              slotCounts[pos] < LINEUP[pos].max
-            ) {
+            
+            // Try bench (only if bench has space and position isn't at max)
+            if (slotCounts.BENCH < LINEUP.BENCH && slotCounts[pos] < LINEUP[pos].max) {
               slotCounts.BENCH++;
               slotCounts[pos]++;
               assigned.push({ ...player, slot: "Bench" });
               continue;
             }
-            assigned.push({ ...player, slot: "N/A" });
+            
+            // If we reach here, player cannot be assigned to any valid slot
+            console.warn(`Player ${player.Name} cannot be assigned to any valid slot - position ${pos} at max or no bench space`);
+            // Don't add this player to assigned array - they will be filtered out
           }
           return (
             <div style={{ marginTop: "2rem", padding: "1rem", background: "#f5f5f5", borderRadius: 8 }}>
@@ -1291,34 +1637,64 @@ const App = () => {
               {assigned.length === 0 ? (
                 <div style={{ color: "#888" }}>No players drafted yet.</div>
               ) : (
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead>
-                    <tr>
-                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>Player</th>
-                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>Position</th>
-                      <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>Slot</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {assigned.map((p, i) => (
-                      <tr key={p.PlayerID}>
-                        <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>{p.Name}</td>
-                        <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>{p.Position}</td>
-                        <td style={{
-                          padding: "0.5rem",
-                          borderBottom: "1px solid #eee",
-                          color:
-                            p.slot === "Main" ? "#2e7d32" :
-                            p.slot === "FLEX" ? "#1976d2" :
-                            p.slot === "Bench" ? "#f57c00" : "#c62828",
-                          fontWeight: "bold"
-                        }}>
-                          {p.slot}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <>
+                  {/* Main Lineup */}
+                  <div style={{ marginBottom: "1rem" }}>
+                    <h4 style={{ color: "#2e7d32", marginBottom: "0.5rem" }}>🏁 Main Lineup</h4>
+                    <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: "1rem" }}>
+                      <thead>
+                        <tr>
+                          <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>Slot</th>
+                          <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>Player</th>
+                          <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>Position</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {assigned.filter(p => p.slot === "Main" || p.slot === "FLEX").map((p, i) => (
+                          <tr key={p.PlayerID}>
+                            <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee", fontWeight: "bold", color: p.slot === "FLEX" ? "#1976d2" : "#2e7d32" }}>
+                              {p.slot === "FLEX" ? "FLEX" : p.Position}
+                            </td>
+                            <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>{p.Name}</td>
+                            <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>{p.Position}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Bench */}
+                  {assigned.filter(p => p.slot === "Bench").length > 0 && (
+                    <div>
+                      <h4 style={{ color: "#f57c00", marginBottom: "0.5rem" }}>🪑 Bench</h4>
+                      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                        <thead>
+                          <tr>
+                            <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>Player</th>
+                            <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ccc" }}>Position</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {assigned.filter(p => p.slot === "Bench").map((p, i) => (
+                            <tr key={p.PlayerID}>
+                              <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>{p.Name}</td>
+                              <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>{p.Position}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* Summary */}
+                  <div style={{ marginTop: "1rem", padding: "0.5rem", backgroundColor: "#e8f5e8", borderRadius: "4px" }}>
+                    <strong>Team Summary:</strong> {assigned.length} valid players
+                    <span style={{ marginLeft: "1rem", fontSize: "0.9em", color: "#666" }}>
+                      (Main: {assigned.filter(p => p.slot === "Main" || p.slot === "FLEX").length}, 
+                      Bench: {assigned.filter(p => p.slot === "Bench").length})
+                    </span>
+                  </div>
+                </>
               )}
             </div>
           );
@@ -1326,7 +1702,7 @@ const App = () => {
       )}
 
       {/* Show all users and their preferred players */}
-      {users.length > 0 && (
+      {/* {users.length > 0 && (
         <div style={{ marginTop: '2rem', padding: '1rem', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
           <h3>⭐ All Players' Preferences</h3>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -1377,19 +1753,76 @@ const App = () => {
             </tbody>
           </table>
         </div>
-      )}
+      )} */}
 
-      {/* Show each user's team */}
-      {Object.entries(selections).map(([user, team]) => (
-        <div key={user}>
-          <h4>{user}'s Team</h4>
-          <ul>
-            {team.map(player => (
-              <li key={player.PlayerID}>{player.Name} - {player.Position}</li>
-            ))}
-          </ul>
-        </div>
-      ))}
+      {/* Show each user's team - only valid slotted players */}
+      {Object.entries(selections).map(([user, team]) => {
+        // Filter to only show players that would get valid slots
+        const LINEUP = {
+          QB: { main: 1, max: 3 },
+          RB: { main: 2, max: 5 },
+          WR: { main: 3, max: 6 },
+          TE: { main: 1, max: 4 },
+          K:  { main: 1, max: 3 },
+          DST:{ main: 1, max: 3 },
+          FLEX: { main: 1, max: 1 },
+          BENCH: 2
+        };
+        const FLEX_ELIGIBLE = ["RB", "WR", "TE"];
+        const slotCounts = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0, BENCH: 0 };
+        const validPlayers = [];
+        
+        for (const player of team) {
+          const pos = player.Position;
+          
+          // Check if position has reached max limit
+          if (slotCounts[pos] >= LINEUP[pos].max) {
+            continue; // Skip this player
+          }
+          
+          // Try to assign to a valid slot
+          if (slotCounts[pos] < LINEUP[pos].main) {
+            slotCounts[pos]++;
+            validPlayers.push({ ...player, slot: "Main" });
+          } else if (FLEX_ELIGIBLE.includes(pos) && slotCounts.FLEX < LINEUP.FLEX.main) {
+            slotCounts.FLEX++;
+            validPlayers.push({ ...player, slot: "FLEX" });
+          } else if (slotCounts.BENCH < LINEUP.BENCH && slotCounts[pos] < LINEUP[pos].max) {
+            slotCounts.BENCH++;
+            slotCounts[pos]++;
+            validPlayers.push({ ...player, slot: "Bench" });
+          }
+          // If none of the above, player is not included in valid players
+        }
+
+        return (
+          <div key={user} style={{ marginBottom: "1rem", padding: "1rem", backgroundColor: "#f9f9f9", borderRadius: "4px" }}>
+            <h4>{user}'s Team ({validPlayers.length} valid players)</h4>
+            {validPlayers.length === 0 ? (
+              <p style={{ color: "#888", fontStyle: "italic" }}>No valid players yet</p>
+            ) : (
+              <ul style={{ margin: 0, paddingLeft: "1.5rem" }}>
+                {validPlayers.map(player => (
+                  <li key={player.PlayerID} style={{ marginBottom: "0.25rem" }}>
+                    <span style={{ fontWeight: "bold" }}>{player.Name}</span> - {player.Position}
+                    <span style={{ 
+                      marginLeft: "0.5rem", 
+                      fontSize: "0.8em", 
+                      color: 
+                        player.slot === "Main" ? "#2e7d32" :
+                        player.slot === "FLEX" ? "#1976d2" :
+                        "#f57c00",
+                      fontWeight: "bold" 
+                    }}>
+                      ({player.slot === "FLEX" ? "FLEX" : player.slot})
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 };
