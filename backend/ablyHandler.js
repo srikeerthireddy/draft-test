@@ -1177,18 +1177,33 @@ function moveToNextTurn(roomId, rooms) {
   }
 
 
+  // SNAKE DRAFT LOGIC
   room.currentTurnIndex++;
 
 
   // Check if round is complete
   if (room.currentTurnIndex >= room.turnOrder.length) {
-    room.currentTurnIndex = 0;
+    // Round complete - start next round
     room.draftRound++;
+    
     // Check if draft is complete
     if (room.draftRound > room.maxRounds) {
       handleSelectionEnd(roomId, rooms);
       return;
     }
+    
+    // SNAKE DRAFT: Reverse turn order for even rounds
+    if (room.draftRound % 2 === 0) {
+      // Even round - reverse the order
+      room.turnOrder.reverse();
+      console.log(`🔄 SNAKE DRAFT: Round ${room.draftRound} - Turn order reversed:`, room.turnOrder);
+    } else {
+      // Odd round - keep original order
+      console.log(`🔄 SNAKE DRAFT: Round ${room.draftRound} - Turn order normal:`, room.turnOrder);
+    }
+    
+    // Reset to first player in the new order
+    room.currentTurnIndex = 0;
   }
 
 

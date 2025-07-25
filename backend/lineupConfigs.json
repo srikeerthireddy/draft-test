@@ -8,7 +8,8 @@
       { "position": "TE", "minDraftable": 1, "maxDraftable": 4, "notes": "1 starter + 1 FLEX + 2 bench" },
       { "position": "K", "minDraftable": 1, "maxDraftable": 3, "notes": "1 starter + 2 bench" },
       { "position": "DST", "minDraftable": 1, "maxDraftable": 3, "notes": "1 starter + 2 bench" },
-      { "position": "FLEX", "minDraftable": 1, "maxDraftable": 1, "notes": "Required slot, accepts RB/WR/TE" }
+      { "position": "FLEX", "minDraftable": 1, "maxDraftable": 1, "notes": "Required slot, accepts RB/WR/TE" },
+      { "position": "BENCH", "minDraftable": 2, "maxDraftable": 2, "notes": "2 bench slots" }
     ]
   },
   {
@@ -20,7 +21,8 @@
       { "position": "TE", "minDraftable": 1, "maxDraftable": 4, "notes": "1 starter + 1 FLEX + 2 bench" },
       { "position": "K", "minDraftable": 1, "maxDraftable": 3, "notes": "1 starter + 2 bench" },
       { "position": "DST", "minDraftable": 1, "maxDraftable": 3, "notes": "1 starter + 2 bench" },
-      { "position": "FLEX", "minDraftable": 1, "maxDraftable": 1, "notes": "Required slot, accepts RB/WR/TE" }
+      { "position": "FLEX", "minDraftable": 1, "maxDraftable": 1, "notes": "Required slot, accepts RB/WR/TE" },
+      { "position": "BENCH", "minDraftable": 2, "maxDraftable": 2, "notes": "2 bench slots" }
     ]
   }
 ]
