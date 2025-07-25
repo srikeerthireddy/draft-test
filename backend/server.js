@@ -10,6 +10,8 @@ const axios = require('axios');
 const lineupConfigs = require('./lineupConfigs.json');
 const { isDraftValid } = require('./isDraftValid');
 
+
+
 const app = express();
 const server = http.createServer(app);
 // Allow both 3000 and 3001 for local dev
@@ -307,6 +309,181 @@ async function generatePlayerPool() {
   }
 }
 
+
+// Auto-pick player endpoint
+app.post('/api/auto-pick-player', (req, res) => {
+  try {
+    const { roomId, clientId } = req.body;
+    
+    if (!roomId || !clientId) {
+      return res.status(400).json({ error: 'Missing roomId or clientId' });
+    }
+
+    const room = rooms[roomId];
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    if (!room.started) {
+      return res.status(400).json({ error: 'Draft has not started yet' });
+    }
+
+    // Find the user by clientId
+    const user = room.users.find(u => u.clientId === clientId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if it's the user's turn
+    const currentTurnUserId = room.turnOrder[room.currentTurnIndex];
+    if (currentTurnUserId !== user.id) {
+      return res.status(400).json({ error: 'Not your turn' });
+    }
+
+    console.log(`🤖 Manual auto-pick requested by ${user.username} in room ${roomId}`);
+    console.log(`🔍 DEBUG: User ID: ${user.id}, Current turn user ID: ${currentTurnUserId}`);
+    console.log(`🔍 DEBUG: Turn order: ${room.turnOrder.join(', ')}`);
+    console.log(`🔍 DEBUG: Current turn index: ${room.currentTurnIndex}`);
+    
+    // Simple auto-pick logic that prioritizes TE, K, DST
+    const userSelections = room.selections[user.id] || [];
+    const positionCounts = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0 };
+    
+    userSelections.forEach(player => {
+      const pos = player.rosterPosition || player.Position;
+      if (positionCounts.hasOwnProperty(pos)) {
+        positionCounts[pos]++;
+      }
+    });
+    
+    console.log(`📊 Current position counts:`, positionCounts);
+    console.log(`🎯 Pool has ${room.pool.length} players`);
+    console.log(`🎯 Pool positions:`, room.pool.map(p => p.Position).reduce((acc, pos) => {
+      acc[pos] = (acc[pos] || 0) + 1;
+      return acc;
+    }, {}));
+    
+    let selectedPlayer = null;
+    
+    // PRIORITY 1: Force select TE if missing
+    if ((positionCounts.TE || 0) < 1) {
+      console.log(`🎯 PRIORITY 1: Looking for TE players`);
+      const tePlayers = room.pool.filter(p => p.Position === 'TE');
+      console.log(`🎯 Found ${tePlayers.length} TE players:`, tePlayers.map(p => p.Name));
+      
+      if (tePlayers.length > 0) {
+        const tePlayer = tePlayers[0];
+        console.log(`🎯 SELECTING TE: ${tePlayer.Name}`);
+        tePlayer.rosterPosition = 'TE';
+        const playerIndex = room.pool.findIndex(p => p.PlayerID === tePlayer.PlayerID);
+        room.pool.splice(playerIndex, 1);
+        if (!room.selections[user.id]) {
+          room.selections[user.id] = [];
+        }
+        room.selections[user.id].push(tePlayer);
+        selectedPlayer = tePlayer;
+        console.log(`✅ SUCCESS: Selected TE ${tePlayer.Name}`);
+      }
+    }
+    
+    // PRIORITY 2: Force select K if missing
+    if (!selectedPlayer && (positionCounts.K || 0) < 1) {
+      console.log(`🎯 PRIORITY 2: Looking for K players`);
+      const kPlayers = room.pool.filter(p => p.Position === 'K');
+      console.log(`🎯 Found ${kPlayers.length} K players:`, kPlayers.map(p => p.Name));
+      
+      if (kPlayers.length > 0) {
+        const kPlayer = kPlayers[0];
+        console.log(`🎯 SELECTING K: ${kPlayer.Name}`);
+        kPlayer.rosterPosition = 'K';
+        const playerIndex = room.pool.findIndex(p => p.PlayerID === kPlayer.PlayerID);
+        room.pool.splice(playerIndex, 1);
+        if (!room.selections[user.id]) {
+          room.selections[user.id] = [];
+        }
+        room.selections[user.id].push(kPlayer);
+        selectedPlayer = kPlayer;
+        console.log(`✅ SUCCESS: Selected K ${kPlayer.Name}`);
+      }
+    }
+    
+    // PRIORITY 3: Force select DST if missing
+    if (!selectedPlayer && (positionCounts.DST || 0) < 1) {
+      console.log(`🎯 PRIORITY 3: Looking for DST players`);
+      const dstPlayers = room.pool.filter(p => p.Position === 'DST');
+      console.log(`🎯 Found ${dstPlayers.length} DST players:`, dstPlayers.map(p => p.Name));
+      
+      if (dstPlayers.length > 0) {
+        const dstPlayer = dstPlayers[0];
+        console.log(`🎯 SELECTING DST: ${dstPlayer.Name}`);
+        dstPlayer.rosterPosition = 'DST';
+        const playerIndex = room.pool.findIndex(p => p.PlayerID === dstPlayer.PlayerID);
+        room.pool.splice(playerIndex, 1);
+        if (!room.selections[user.id]) {
+          room.selections[user.id] = [];
+        }
+        room.selections[user.id].push(dstPlayer);
+        selectedPlayer = dstPlayer;
+        console.log(`✅ SUCCESS: Selected DST ${dstPlayer.Name}`);
+      }
+    }
+    
+    // PRIORITY 4: If no critical positions missing, pick any valid player
+    if (!selectedPlayer) {
+      console.log(`🎯 PRIORITY 4: No critical positions missing, picking any valid player`);
+      
+      for (let i = 0; i < room.pool.length; i++) {
+        const player = room.pool[i];
+        const validation = isDraftValid(userSelections, player, lineupConfigs[0]);
+        if (validation.valid) {
+          player.rosterPosition = validation.position;
+          room.pool.splice(i, 1);
+          if (!room.selections[user.id]) {
+            room.selections[user.id] = [];
+          }
+          room.selections[user.id].push(player);
+          selectedPlayer = player;
+          console.log(`✅ SUCCESS: Selected ${player.Name} (${player.Position}) -> ${validation.position}`);
+          break;
+        }
+      }
+    }
+   
+    if (selectedPlayer) {
+      console.log(`✅ Auto-pick successful: ${user.username} auto-selected ${selectedPlayer.Name} (${selectedPlayer.Position}) -> ${selectedPlayer.rosterPosition}`);
+      
+      // Move to next turn
+      room.currentTurnIndex = (room.currentTurnIndex + 1) % room.turnOrder.length;
+      
+      res.json({ 
+        success: true, 
+        message: 'Auto-pick successful',
+        selection: {
+          player: selectedPlayer,
+          wasPreferred: false,
+          source: 'auto-pick'
+        }
+      });
+    } else {
+      console.log(`❌ Auto-pick failed for ${user.username}: no valid players available`);
+      
+      // Move to next turn even if auto-pick failed
+      room.currentTurnIndex = (room.currentTurnIndex + 1) % room.turnOrder.length;
+      
+      res.json({ 
+        success: false, 
+        message: 'Auto-pick failed - no valid players available',
+        selection: null
+      });
+    }
+    
+    return;
+
+  } catch (error) {
+    console.error('Error in auto-pick endpoint:', error);
+    res.status(500).json({ error: 'Internal server error during auto-pick' });
+  }
+});
 
 const PORT = process.env.PORT || 8000;
 

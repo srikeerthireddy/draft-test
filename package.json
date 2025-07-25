@@ -1,0 +1,18 @@
+{
+  "name": "draft-test",
+  "version": "1.0.0",
+  "description": "NFL Draft Application with Backend and Frontend",
+  "scripts": {
+    "start": "concurrently \"npm run backend\" \"npm run frontend\"",
+    "backend": "cd backend && npm start",
+    "frontend": "cd my-app && npm start",
+    "install-all": "npm install && cd backend && npm install && cd ../my-app && npm install",
+    "dev": "concurrently \"npm run backend\" \"npm run frontend\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "keywords": ["nfl", "draft", "fantasy", "football"],
+  "author": "",
+  "license": "ISC"
+} 

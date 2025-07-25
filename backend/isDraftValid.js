@@ -21,8 +21,18 @@ function isDraftValid(userSelections, playerToDraft, lineupConfig) {
   const posConfig = lineupConfig.positions.find(p => p.position === playerToDraft.Position);
   const flexConfig = lineupConfig.positions.find(p => p.position === "FLEX");
 
-  // 1. Main slot
+  // 1. Main slot - prioritize TE, K, DST for main slots
   if (posConfig && counts[playerToDraft.Position] < posConfig.minDraftable) {
+    // For TE, K, DST - always try to fill main slot first
+    if (['TE', 'K', 'DST'].includes(playerToDraft.Position)) {
+      return {
+        valid: true,
+        position: playerToDraft.Position,
+        slot: 'Main'
+      };
+    }
+    
+    // For other positions, check if we have space
     return {
       valid: true,
       position: playerToDraft.Position,
