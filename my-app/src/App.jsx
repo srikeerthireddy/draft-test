@@ -1489,13 +1489,14 @@ const App = () => {
               <tbody>
                 {pool.map(player => {
                   const myCurrentSelections = selections[username] || [];
-                  const canFit = canPlayerFit(player.Position, myCurrentSelections);
+                  const canFit = canPlayerFit(player.Position, myCurrentSelections); // keep for possible future use, but don't use for disabling
                   const isPreferred = preferred.includes(player.PlayerID);
                   const preferredIndex = preferred.indexOf(player.PlayerID);
                   
                   return (
                     <tr key={player.PlayerID} style={{
-                      backgroundColor: isPreferred ? '#e8f5e8' : 'transparent'
+                      backgroundColor: isPreferred ? '#e8f5e8' : 'transparent',
+                      opacity: 1
                     }}>
                       <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>
                         {isPreferred && <span style={{ color: '#4caf50', fontWeight: 'bold' }}>⭐ </span>}
@@ -1518,31 +1519,31 @@ const App = () => {
                       </td>
                       <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>
                         <span style={{
-                          color: canFit ? '#4caf50' : '#f44336',
+                          color: '#4caf50',
                           fontWeight: 'bold',
                           fontSize: '0.9em'
                         }}>
-                          {canFit ? '✅ Available' : '❌ No slots'}
+                          Available
                         </span>
                       </td>
                       <td style={{ padding: '0.5rem', borderBottom: '1px solid #eee' }}>
                         <button
                           onClick={() => selectPlayer(player.PlayerID)}
-                          disabled={!isMyTurn || !canFit}
+                          disabled={!isMyTurn}
+                          title={!isMyTurn ? 'Not your turn' : 'Select this player'}
                           style={{
                             padding: "0.5rem 1rem",
                             backgroundColor: 
                               !isMyTurn ? "#ccc" :
-                              !canFit ? "#ffcdd2" :
                               isPreferred ? "#4caf50" : "#2196f3",
                             color: "white",
                             border: "none",
                             borderRadius: "4px",
-                            cursor: (!isMyTurn || !canFit) ? "not-allowed" : "pointer",
-                            opacity: (!isMyTurn || !canFit) ? 0.6 : 1
+                            cursor: !isMyTurn ? "not-allowed" : "pointer",
+                            opacity: !isMyTurn ? 0.6 : 1
                           }}
                         >
-                          {!canFit ? "Full" : "Select"}
+                          Select
                         </button>
                       </td>
                     </tr>

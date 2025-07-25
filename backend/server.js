@@ -345,9 +345,12 @@ app.post('/api/auto-pick-player', (req, res) => {
     console.log(`🔍 DEBUG: Turn order: ${room.turnOrder.join(', ')}`);
     console.log(`🔍 DEBUG: Current turn index: ${room.currentTurnIndex}`);
     
-    // Simple auto-pick logic that prioritizes TE, K, DST
+    // SMART AUTO-PICK LOGIC: Check available slots first, then pick valid players
     const userSelections = room.selections[user.id] || [];
-    const positionCounts = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0 };
+    const lineupConfig = lineupConfigs[0];
+    
+    // Calculate current position counts and available slots
+    const positionCounts = { QB: 0, RB: 0, WR: 0, TE: 0, K: 0, DST: 0, FLEX: 0, BENCH: 0 };
     
     userSelections.forEach(player => {
       const pos = player.rosterPosition || player.Position;
@@ -358,94 +361,146 @@ app.post('/api/auto-pick-player', (req, res) => {
     
     console.log(`📊 Current position counts:`, positionCounts);
     console.log(`🎯 Pool has ${room.pool.length} players`);
-    console.log(`🎯 Pool positions:`, room.pool.map(p => p.Position).reduce((acc, pos) => {
-      acc[pos] = (acc[pos] || 0) + 1;
-      return acc;
-    }, {}));
+    
+    // Calculate available slots for each position
+    const availableSlots = {};
+    const LINEUP = {
+      QB: { main: 1, max: 3 },
+      RB: { main: 2, max: 5 },
+      WR: { main: 3, max: 6 },
+      TE: { main: 1, max: 4 },
+      K: { main: 1, max: 3 },
+      DST: { main: 1, max: 3 },
+      FLEX: { main: 1, max: 1 },
+      BENCH: { main: 2, max: 2 }
+    };
+    
+    // Check if there are any available slots at all
+    let totalAvailableSlots = 0;
+    Object.keys(LINEUP).forEach(pos => {
+      if (pos === 'FLEX' || pos === 'BENCH') return;
+      const current = positionCounts[pos] || 0;
+      const available = LINEUP[pos].max - current;
+      if (available > 0) {
+        availableSlots[pos] = available;
+        totalAvailableSlots += available;
+      }
+    });
+    
+    // Check FLEX and BENCH separately
+    const flexAvailable = LINEUP.FLEX.max - (positionCounts.FLEX || 0);
+    const benchAvailable = LINEUP.BENCH.max - (positionCounts.BENCH || 0);
+    if (flexAvailable > 0) {
+      availableSlots.FLEX = flexAvailable;
+      totalAvailableSlots += flexAvailable;
+    }
+    if (benchAvailable > 0) {
+      availableSlots.BENCH = benchAvailable;
+      totalAvailableSlots += benchAvailable;
+    }
+    
+    console.log(`🔍 Available slots:`, availableSlots);
+    console.log(`🔍 Total available slots: ${totalAvailableSlots}`);
+    
+    // If no slots available, don't pick any player
+    if (totalAvailableSlots === 0) {
+      console.log(`❌ NO AVAILABLE SLOTS - Cannot pick any player`);
+      room.currentTurnIndex = (room.currentTurnIndex + 1) % room.turnOrder.length;
+      res.json({ 
+        success: false, 
+        message: 'No available slots - lineup is full',
+        selection: null
+      });
+      return;
+    }
     
     let selectedPlayer = null;
     
-    // PRIORITY 1: Force select TE if missing
-    if ((positionCounts.TE || 0) < 1) {
-      console.log(`🎯 PRIORITY 1: Looking for TE players`);
-      const tePlayers = room.pool.filter(p => p.Position === 'TE');
-      console.log(`🎯 Found ${tePlayers.length} TE players:`, tePlayers.map(p => p.Name));
+    // PRIORITY 1: Check preference list first (if user has preferences)
+    const userPreferences = room.preferredQueue[user.id] || [];
+    if (userPreferences.length > 0) {
+      console.log(`🎯 PRIORITY 1: Checking preference list (${userPreferences.length} players)`);
       
-      if (tePlayers.length > 0) {
-        const tePlayer = tePlayers[0];
-        console.log(`🎯 SELECTING TE: ${tePlayer.Name}`);
-        tePlayer.rosterPosition = 'TE';
-        const playerIndex = room.pool.findIndex(p => p.PlayerID === tePlayer.PlayerID);
-        room.pool.splice(playerIndex, 1);
-        if (!room.selections[user.id]) {
-          room.selections[user.id] = [];
-        }
-        room.selections[user.id].push(tePlayer);
-        selectedPlayer = tePlayer;
-        console.log(`✅ SUCCESS: Selected TE ${tePlayer.Name}`);
-      }
-    }
-    
-    // PRIORITY 2: Force select K if missing
-    if (!selectedPlayer && (positionCounts.K || 0) < 1) {
-      console.log(`🎯 PRIORITY 2: Looking for K players`);
-      const kPlayers = room.pool.filter(p => p.Position === 'K');
-      console.log(`🎯 Found ${kPlayers.length} K players:`, kPlayers.map(p => p.Name));
-      
-      if (kPlayers.length > 0) {
-        const kPlayer = kPlayers[0];
-        console.log(`🎯 SELECTING K: ${kPlayer.Name}`);
-        kPlayer.rosterPosition = 'K';
-        const playerIndex = room.pool.findIndex(p => p.PlayerID === kPlayer.PlayerID);
-        room.pool.splice(playerIndex, 1);
-        if (!room.selections[user.id]) {
-          room.selections[user.id] = [];
-        }
-        room.selections[user.id].push(kPlayer);
-        selectedPlayer = kPlayer;
-        console.log(`✅ SUCCESS: Selected K ${kPlayer.Name}`);
-      }
-    }
-    
-    // PRIORITY 3: Force select DST if missing
-    if (!selectedPlayer && (positionCounts.DST || 0) < 1) {
-      console.log(`🎯 PRIORITY 3: Looking for DST players`);
-      const dstPlayers = room.pool.filter(p => p.Position === 'DST');
-      console.log(`🎯 Found ${dstPlayers.length} DST players:`, dstPlayers.map(p => p.Name));
-      
-      if (dstPlayers.length > 0) {
-        const dstPlayer = dstPlayers[0];
-        console.log(`🎯 SELECTING DST: ${dstPlayer.Name}`);
-        dstPlayer.rosterPosition = 'DST';
-        const playerIndex = room.pool.findIndex(p => p.PlayerID === dstPlayer.PlayerID);
-        room.pool.splice(playerIndex, 1);
-        if (!room.selections[user.id]) {
-          room.selections[user.id] = [];
-        }
-        room.selections[user.id].push(dstPlayer);
-        selectedPlayer = dstPlayer;
-        console.log(`✅ SUCCESS: Selected DST ${dstPlayer.Name}`);
-      }
-    }
-    
-    // PRIORITY 4: If no critical positions missing, pick any valid player
-    if (!selectedPlayer) {
-      console.log(`🎯 PRIORITY 4: No critical positions missing, picking any valid player`);
-      
-      for (let i = 0; i < room.pool.length; i++) {
-        const player = room.pool[i];
-        const validation = isDraftValid(userSelections, player, lineupConfigs[0]);
-        if (validation.valid) {
-          player.rosterPosition = validation.position;
-          room.pool.splice(i, 1);
-          if (!room.selections[user.id]) {
-            room.selections[user.id] = [];
+      for (const preferredPlayerId of userPreferences) {
+        const preferredPlayer = room.pool.find(p => p.PlayerID === preferredPlayerId);
+        if (preferredPlayer) {
+          const validation = isDraftValid(userSelections, preferredPlayer, lineupConfig);
+          if (validation.valid) {
+            console.log(`✅ Found valid preferred player: ${preferredPlayer.Name} (${preferredPlayer.Position}) -> ${validation.position}`);
+            preferredPlayer.rosterPosition = validation.position;
+            const playerIndex = room.pool.findIndex(p => p.PlayerID === preferredPlayer.PlayerID);
+            room.pool.splice(playerIndex, 1);
+            if (!room.selections[user.id]) {
+              room.selections[user.id] = [];
+            }
+            room.selections[user.id].push(preferredPlayer);
+            selectedPlayer = preferredPlayer;
+            selectedPlayer.wasPreferred = true;
+            selectedPlayer.autoPickSource = 'preference-list';
+            break;
+          } else {
+            console.log(`⏭️ Skipping preferred player ${preferredPlayer.Name} - cannot fit (${validation.reason})`);
           }
-          room.selections[user.id].push(player);
-          selectedPlayer = player;
-          console.log(`✅ SUCCESS: Selected ${player.Name} (${player.Position}) -> ${validation.position}`);
-          break;
         }
+      }
+    }
+    
+    // PRIORITY 2: If no valid preferred player, pick by position priority (TE, K, DST first)
+    if (!selectedPlayer) {
+      console.log(`🎯 PRIORITY 2: No valid preferred players, checking by position priority`);
+      
+      // Priority order: TE, K, DST, then others
+      const priorityPositions = ['TE', 'K', 'DST', 'QB', 'RB', 'WR'];
+      
+      for (const pos of priorityPositions) {
+        if (availableSlots[pos] && availableSlots[pos] > 0) {
+          console.log(`🎯 Looking for ${pos} players (${availableSlots[pos]} slots available)`);
+          const posPlayers = room.pool.filter(p => p.Position === pos);
+          
+          if (posPlayers.length > 0) {
+            const player = posPlayers[0];
+            const validation = isDraftValid(userSelections, player, lineupConfig);
+            if (validation.valid) {
+              console.log(`✅ Found valid ${pos} player: ${player.Name} -> ${validation.position}`);
+              player.rosterPosition = validation.position;
+              const playerIndex = room.pool.findIndex(p => p.PlayerID === player.PlayerID);
+              room.pool.splice(playerIndex, 1);
+              if (!room.selections[user.id]) {
+                room.selections[user.id] = [];
+              }
+              room.selections[user.id].push(player);
+              selectedPlayer = player;
+              selectedPlayer.autoPickSource = 'position-priority';
+              break;
+            }
+          }
+        }
+      }
+    }
+    
+    // PRIORITY 3: If still no player, pick any valid player efficiently
+    if (!selectedPlayer) {
+      console.log(`🎯 PRIORITY 3: Picking any valid player efficiently`);
+      
+      // Filter pool for players that can fit in available slots
+      const validPlayers = room.pool.filter(player => {
+        const validation = isDraftValid(userSelections, player, lineupConfig);
+        return validation.valid;
+      });
+      
+      if (validPlayers.length > 0) {
+        const player = validPlayers[0];
+        const validation = isDraftValid(userSelections, player, lineupConfig);
+        console.log(`✅ Found valid player: ${player.Name} (${player.Position}) -> ${validation.position}`);
+        player.rosterPosition = validation.position;
+        const playerIndex = room.pool.findIndex(p => p.PlayerID === player.PlayerID);
+        room.pool.splice(playerIndex, 1);
+        if (!room.selections[user.id]) {
+          room.selections[user.id] = [];
+        }
+        room.selections[user.id].push(player);
+        selectedPlayer = player;
+        selectedPlayer.autoPickSource = 'efficient-filter';
       }
     }
    
@@ -460,8 +515,8 @@ app.post('/api/auto-pick-player', (req, res) => {
         message: 'Auto-pick successful',
         selection: {
           player: selectedPlayer,
-          wasPreferred: false,
-          source: 'auto-pick'
+          wasPreferred: selectedPlayer.wasPreferred || false,
+          source: selectedPlayer.autoPickSource || 'auto-pick'
         }
       });
     } else {
