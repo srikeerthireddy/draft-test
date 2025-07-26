@@ -28,6 +28,8 @@ const App = () => {
   const [turnTimer, setTurnTimer] = useState(0);
   const [isMyTurn, setIsMyTurn] = useState(false);
   const [turnOrder, setTurnOrder] = useState([]);
+  const [draftRound, setDraftRound] = useState(1);
+  const [currentTurnIndex, setCurrentTurnIndex] = useState(0);
 
   // Preference state
   const [preferred, setPreferred] = useState([]);
@@ -314,14 +316,20 @@ const App = () => {
       });
       roomChannel.subscribe('draft-started-meta', (message) => {
         setDraftStartedMeta(message.data);
+        if (message.data.draftRound) {
+          setDraftRound(message.data.draftRound);
+        }
       });
 
       roomChannel.subscribe('turn-started', (message) => {
         console.log("🎯 Turn started:", message.data);
-        const { currentUser, timeLeft, userId } = message.data;
+        const { currentUser, timeLeft, userId, draftRound: round, currentTurnIndex: turnIndex, turnOrder: order } = message.data;
         setTurn(currentUser);
         setIsMyTurn(userId === clientId);
         setTurnTimer(timeLeft);
+        if (round) setDraftRound(round);
+        if (turnIndex !== undefined) setCurrentTurnIndex(turnIndex);
+        if (order) setTurnOrder(order);
       });
 
       roomChannel.subscribe('player-selected-pool', (message) => {
@@ -950,7 +958,7 @@ const App = () => {
         <p>
           <strong>Status:</strong>{" "}
           {gameStarted
-            ? `🎮 Playing (${currentPhase} phase)`
+            ? `🎮 Playing (${currentPhase} phase) - Round ${draftRound}`
             : "⏳ Waiting to start"}
         </p>
         <p>
@@ -1038,7 +1046,10 @@ const App = () => {
       {/* Turn Order */}
       {gameStarted && turnOrder.length > 0 && (
         <div style={{ marginBottom: "2rem" }}>
-          <h3>📋 Draft Order</h3>
+          <h3>📋 Snake Draft Order - Round {draftRound}</h3>
+          <p style={{ color: "#666", fontSize: "0.9em", marginBottom: "0.5rem" }}>
+            {draftRound % 2 === 1 ? "🔄 Normal order (1→2→3→4)" : "🔄 Reversed order (4→3→2→1)"}
+          </p>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
             {turnOrder.map((playerName, index) => (
               <span

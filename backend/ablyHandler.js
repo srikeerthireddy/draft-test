@@ -354,58 +354,49 @@ function setupAbly(rooms) {
       return { error: "Room not found" };
     }
 
-
     console.log('[Ably] Room hostId:', room.hostId, 'Users:', room.users.map(u => u.id));
     if (clientId !== room.hostId) {
       console.log('[Ably] Not host:', clientId, 'Host is:', room.hostId);
       return { error: "Only host can start the draft" };
     }
 
-
     if (room.users.length < 2) {
       console.log('[Ably] Not enough users:', room.users.length);
       return { error: "Need at least 2 players to start" };
     }
 
-
-    // const allPlayersSubmitted = checkAllPreferencesSubmitted(room);
-    // if (!allPlayersSubmitted) {
-    //   return { error: "All players must submit their preferences first" };
-    // }
-
-
-    // Start the draft
+    // Start the draft with proper snake draft initialization
     room.started = true;
     room.turnOrder = room.users.map(u => u.id);
     room.currentTurnIndex = 0;
+    room.draftRound = 1; // Initialize draft round
     room.selectionPhase = 'main';
 
-
-    console.log(`🚀 Draft started for room ${roomId}`);
-    console.log(`Turn order: ${room.turnOrder.map(id => {
+    console.log(`🚀 SNAKE DRAFT started for room ${roomId}`);
+    console.log(`Initial turn order (Round 1): ${room.turnOrder.map(id => {
       const user = room.users.find(u => u.id === id);
       return user ? user.username : id;
-    }).join(' -> ')}`);
-
+    }).join(' → ')}`);
 
     // Chunk pool for draft-started
     publishChunked(ably.channels.get(`draft-room-${roomId}`), 'draft-started-pool', room.pool);
-    // Send meta info
+    
+    // Send meta info with current turn order
+    const currentTurnOrder = getCurrentTurnOrder(room);
     publishToRoom(roomId, 'draft-started-meta', {
-      turnOrder: room.turnOrder.map(id => {
+      turnOrder: currentTurnOrder.map(id => {
         const user = room.users.find(u => u.id === id);
         return user ? user.username : null;
       }).filter(Boolean),
-      currentUser: room.users.find(u => u.id === room.turnOrder[0])?.username,
-      selectionPhase: room.selectionPhase
+      currentUser: room.users.find(u => u.id === currentTurnOrder[0])?.username,
+      selectionPhase: room.selectionPhase,
+      draftRound: room.draftRound
     });
-
 
     // Start the first turn
     setTimeout(() => {
       startTurn(roomId, rooms);
     }, 1000);
-
 
     return { status: 'success' };
   }
@@ -427,9 +418,13 @@ function handleSelectPlayer(roomId, clientId, playerID) {
   }
 
 
-  const currentTurnUserId = room.turnOrder[room.currentTurnIndex];
+  const currentTurnUserId = getCurrentTurnUserId(room);
   if (clientId !== currentTurnUserId) {
     console.log(`[select-player] Not your turn: clientId=${clientId}, expected=${currentTurnUserId}`);
+    console.log(`[select-player] Current turn order: ${getCurrentTurnOrder(room).map(id => {
+      const user = room.users.find(u => u.id === id);
+      return user ? user.username : id;
+    }).join(' → ')}`);
     return { error: "It's not your turn" };
   }
 
@@ -877,7 +872,8 @@ function autoSelectForDisconnectedUser(roomId, rooms, userId, username) {
       player: selection,
       selectedBy: username,
       userId: userId,
-      autoSelected: true
+      autoSelected: true,
+      wasPreferred: selection.wasPreferred || false
     });
   } else {
     // No valid player could be auto-selected, log this and notify
@@ -977,16 +973,16 @@ function autoSelectForDisconnectedUser(roomId, rooms, userId, username) {
 
 
     if (!room.started) {
-      console.log(`[auto-pick] Draft has not started yet: roomId=${roomId}`);
-      return { error: "Draft has not started yet" };
-    }
+          console.log(`[auto-pick] Draft has not started yet: roomId=${roomId}`);
+    return { error: "Draft has not started yet" };
+  }
 
 
-    const currentTurnUserId = room.turnOrder[room.currentTurnIndex];
-    if (clientId !== currentTurnUserId) {
-      console.log(`[auto-pick] Not your turn: clientId=${clientId}, expected=${currentTurnUserId}`);
-      return { error: "It's not your turn" };
-    }
+  const currentTurnUserId = getCurrentTurnUserId(room);
+  if (clientId !== currentTurnUserId) {
+    console.log(`[auto-pick] Not your turn: clientId=${clientId}, expected=${currentTurnUserId}`);
+    return { error: "It's not your turn" };
+  }
 
 
     const user = room.users.find(u => u.id === clientId);
@@ -1107,24 +1103,22 @@ function startTurn(roomId, rooms) {
   const room = rooms[roomId];
   if (!room || !room.started) return;
 
-
-  // Debug logs for turnOrder and users
-  console.log('Current turnOrder:', room.turnOrder);
-  console.log('Current users:', room.users.map(u => u.id));
-
-
-  const currentTurnUserId = room.turnOrder[room.currentTurnIndex];
+  // Get current turn order for snake draft
+  const currentTurnOrder = getCurrentTurnOrder(room);
+  const currentTurnUserId = getCurrentTurnUserId(room);
   const currentUser = room.users.find(u => u.id === currentTurnUserId);
 
-
   if (!currentUser) {
-    console.log(`❌ User not found for turn ${room.currentTurnIndex}`);
+    console.log(`❌ User not found for turn ${room.currentTurnIndex} in round ${room.draftRound}`);
     return;
   }
 
-
+  console.log(`🎯 SNAKE DRAFT: Round ${room.draftRound}, Turn ${room.currentTurnIndex + 1}/${currentTurnOrder.length}`);
   console.log(`🎯 ${currentUser.username}'s turn in room ${roomId}`);
-
+  console.log(`🎯 Current turn order: ${currentTurnOrder.map(id => {
+    const user = room.users.find(u => u.id === id);
+    return user ? user.username : id;
+  }).join(' → ')}`);
 
   // Check if user is disconnected
   const isDisconnected = !room.users.find(u => u.id === currentTurnUserId);
@@ -1135,7 +1129,6 @@ function startTurn(roomId, rooms) {
     }, 10000); // 10 seconds for disconnected user
     return;
   }
-
 
   // Start turn timer (10 seconds)
   let timeLeft = 10; // 10 seconds per turn
@@ -1151,7 +1144,6 @@ function startTurn(roomId, rooms) {
     }
   }, 1000);
 
-
   // Publish turn started event
   const ably = new Ably.Rest({
     key: 'E_U1fw.iYMzEg:KNoWxsCQgLnZ9_oeCL3VWU0NUD3wUB_nbO2rVez2WnA'
@@ -1160,15 +1152,71 @@ function startTurn(roomId, rooms) {
   channel.publish("turn-started", {
     currentUser: currentUser.username,
     timeLeft: 10,
-    userId: currentTurnUserId
+    userId: currentTurnUserId,
+    draftRound: room.draftRound,
+    currentTurnIndex: room.currentTurnIndex,
+    turnOrder: currentTurnOrder.map(id => {
+      const user = room.users.find(u => u.id === id);
+      return user ? user.username : null;
+    }).filter(Boolean)
   });
 }
 
 
+// Helper function to get current turn order for snake draft
+function getCurrentTurnOrder(room) {
+  if (!room || !room.turnOrder || room.turnOrder.length === 0) {
+    return [];
+  }
+  
+  // For odd rounds (1, 3, 5, ...): normal order
+  // For even rounds (2, 4, 6, ...): reversed order
+  if (room.draftRound % 2 === 1) {
+    // Odd round - normal order (1, 2, 3, 4)
+    return [...room.turnOrder];
+  } else {
+    // Even round - reversed order (4, 3, 2, 1)
+    return [...room.turnOrder].reverse();
+  }
+}
+
+// Helper function to get current turn user ID
+function getCurrentTurnUserId(room) {
+  const currentTurnOrder = getCurrentTurnOrder(room);
+  if (currentTurnOrder.length === 0 || room.currentTurnIndex >= currentTurnOrder.length) {
+    return null;
+  }
+  return currentTurnOrder[room.currentTurnIndex];
+}
+
+// Helper function to get the next user ID in snake draft order
+function getNextTurnUserId(room) {
+  const currentTurnOrder = getCurrentTurnOrder(room);
+  if (currentTurnOrder.length === 0) {
+    return null;
+  }
+  const nextIndex = (room.currentTurnIndex + 1) % currentTurnOrder.length;
+  return currentTurnOrder[nextIndex];
+}
+
+// Helper function to advance to next turn in snake draft
+function advanceToNextTurn(room) {
+  room.currentTurnIndex++;
+  
+  // Check if round is complete
+  if (room.currentTurnIndex >= room.turnOrder.length) {
+    // Round complete - start next round
+    room.draftRound++;
+    room.currentTurnIndex = 0; // Reset to first position in new round
+    
+    console.log(`🔄 SNAKE DRAFT: Round ${room.draftRound} starting`);
+    console.log(`🔄 Turn order for round ${room.draftRound}: ${getCurrentTurnOrder(room).join(' → ')}`);
+  }
+}
+
 function moveToNextTurn(roomId, rooms) {
   const room = rooms[roomId];
   if (!room) return;
-
 
   // Clear any existing timer
   if (room.turnTimer) {
@@ -1176,36 +1224,21 @@ function moveToNextTurn(roomId, rooms) {
     room.turnTimer = null;
   }
 
-
-  // SNAKE DRAFT LOGIC
-  room.currentTurnIndex++;
-
-
-  // Check if round is complete
-  if (room.currentTurnIndex >= room.turnOrder.length) {
-    // Round complete - start next round
-    room.draftRound++;
-    
-    // Check if draft is complete
-    if (room.draftRound > room.maxRounds) {
-      handleSelectionEnd(roomId, rooms);
-      return;
-    }
-    
-    // SNAKE DRAFT: Reverse turn order for even rounds
-    if (room.draftRound % 2 === 0) {
-      // Even round - reverse the order
-      room.turnOrder.reverse();
-      console.log(`🔄 SNAKE DRAFT: Round ${room.draftRound} - Turn order reversed:`, room.turnOrder);
-    } else {
-      // Odd round - keep original order
-      console.log(`🔄 SNAKE DRAFT: Round ${room.draftRound} - Turn order normal:`, room.turnOrder);
-    }
-    
-    // Reset to first player in the new order
-    room.currentTurnIndex = 0;
+  // Advance to next turn in snake draft
+  advanceToNextTurn(room);
+  
+  // Check if draft is complete
+  if (room.draftRound > room.maxRounds) {
+    handleSelectionEnd(roomId, rooms);
+    return;
   }
-
+  
+  // Log the snake draft progression
+  const currentTurnOrder = getCurrentTurnOrder(room);
+  const currentUser = getCurrentTurnUserId(room);
+  console.log(`🔄 SNAKE DRAFT: Round ${room.draftRound}, Turn ${room.currentTurnIndex + 1}/${room.turnOrder.length}`);
+  console.log(`🔄 Current turn order: ${currentTurnOrder.join(' → ')}`);
+  console.log(`🔄 Current user: ${currentUser}`);
 
   // Start next turn
   setTimeout(() => {
@@ -2050,5 +2083,4 @@ function checkAllPreferencesSubmitted(room) {
 }
 
 
-module.exports = { setupAbly};
-
+module.exports = { setupAbly, getCurrentTurnOrder, getCurrentTurnUserId };

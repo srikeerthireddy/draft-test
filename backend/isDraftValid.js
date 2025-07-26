@@ -26,9 +26,9 @@ function isDraftValid(userSelections, playerToDraft, lineupConfig) {
   const benchConfig = lineupConfig.positions.find(p => p.position === "BENCH");
 
   // Step 2: Check if player can fit in any available slot
-  // NO POSITION PRIORITIZATION - JUST CHECK IF SLOT IS AVAILABLE
+  // PRIORITIZE MAIN POSITION OVER BENCH
 
-  // 1. Main position slot
+  // 1. Main position slot (highest priority)
   if (posConfig && counts[playerToDraft.Position] < posConfig.maxDraftable) {
     return {
       valid: true,
@@ -50,7 +50,7 @@ function isDraftValid(userSelections, playerToDraft, lineupConfig) {
     };
   }
 
-  // 3. Bench slot (if bench is available)
+  // 3. Bench slot (lowest priority - only if no other slots available)
   if (benchConfig && counts.BENCH < benchConfig.maxDraftable) {
     return {
       valid: true,
